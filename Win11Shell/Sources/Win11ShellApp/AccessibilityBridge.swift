@@ -423,20 +423,20 @@ public enum AccessibilityBridge {
         case trafficLight
         case interactiveControl
         case nativeTitlebarDragSurface
+        case ambiguousContainer
         case unknown
     }
 
-    private static let titlebarAncestorStopRoles: Set<String> = [
+    private static let confirmedBareStopRoles: Set<String> = [
         "AXWindow",
         "AXToolbar",
-        "AXWebArea",
-        "AXApplication",
+        "AXSplitGroup",
         "AXScrollArea",
-        "AXTabGroup"
+        "AXApplication"
     ]
 
     /// Fast AX hit-test used by `CGEventTap` to distinguish interactive titlebar controls
-    /// from native traffic lights and empty OS titlebar drag regions.
+    /// from native traffic lights, bare OS titlebar drag regions, and ambiguous nested containers.
     public static func classifyTitlebarHit(atAXPoint axPoint: CGPoint, pid: pid_t) -> TitlebarHitResult {
         let appEl = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appEl, 0.04)
@@ -447,6 +447,7 @@ public enum AccessibilityBridge {
             return .unknown
         }
 
+        var sawAmbiguousContainer = false
         var current: AXUIElement? = startEl
         for _ in 0..<6 {
             guard let el = current else { break }
@@ -465,9 +466,11 @@ public enum AccessibilityBridge {
                 return .trafficLight
             case .interactiveControl:
                 return .interactiveControl
+            case .ambiguousContainer:
+                sawAmbiguousContainer = true
             case .dragSurface:
-                if let role, titlebarAncestorStopRoles.contains(role) {
-                    return .nativeTitlebarDragSurface
+                if let role, confirmedBareStopRoles.contains(role) {
+                    return sawAmbiguousContainer ? .ambiguousContainer : .nativeTitlebarDragSurface
                 }
             }
 
@@ -481,7 +484,7 @@ public enum AccessibilityBridge {
             }
         }
 
-        return .nativeTitlebarDragSurface
+        return sawAmbiguousContainer ? .ambiguousContainer : .nativeTitlebarDragSurface
     }
 
     // MARK: - Traffic Light Inspection & Titlebar Color Sampling

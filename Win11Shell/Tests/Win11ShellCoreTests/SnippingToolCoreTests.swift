@@ -151,5 +151,71 @@ struct SnippingToolCoreTests {
         let missed = history.erase(near: CGPoint(x: 700, y: 700), tolerance: 10)
         #expect(!missed)
         #expect(history.annotations.count == 2)
+
+        // Text annotation append, proximity erase, undo, redo
+        let textAnno = SnipAnnotation(
+            kind: .text(origin: CGPoint(x: 300, y: 400), text: "Hello\nWorld", fontSize: 24),
+            color: .white,
+            lineWidth: 2
+        )
+        history.append(textAnno)
+        #expect(history.annotations.count == 3)
+
+        let textBox = SnippingGeometry.estimatedTextBoundingRect(
+            origin: CGPoint(x: 300, y: 400),
+            text: "Hello\nWorld",
+            fontSize: 24
+        )
+        #expect(textBox.minX == 300)
+        #expect(textBox.minY == 400)
+        #expect(textBox.width > 60)
+        #expect(textBox.height > 40)
+
+        let missedText = history.erase(near: CGPoint(x: 900, y: 900), tolerance: 8)
+        #expect(!missedText)
+
+        let erasedText = history.erase(near: CGPoint(x: 320, y: 420), tolerance: 8)
+        #expect(erasedText)
+        #expect(history.annotations.count == 2)
+
+        let undoTextErase = history.undo()
+        #expect(undoTextErase)
+        #expect(history.annotations.count == 3)
+        let redoTextErase = history.redo()
+        #expect(redoTextErase)
+        #expect(history.annotations.count == 2)
+    }
+
+    @Test("Recording mode names, directory paths, duration formatting, and even dimensions")
+    func videoRecordingHelpersTests() {
+        #expect(SnipCaptureMode.supportedModes(for: .photo) == [.rectangle, .window, .fullscreen, .freeform])
+        #expect(SnipCaptureMode.supportedModes(for: .video) == [.rectangle, .window, .fullscreen])
+        #expect(SnipToolKind.allCases.contains(.text))
+
+        var comps = DateComponents()
+        comps.year = 2026
+        comps.month = 11
+        comps.day = 27
+        comps.hour = 9
+        comps.minute = 4
+        comps.second = 3
+        let tz = TimeZone(secondsFromGMT: 0)!
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        let date = cal.date(from: comps)!
+
+        #expect(SnippingGeometry.defaultRecordingFilename(date: date, timeZone: tz) == "Recording 2026-11-27 090403.mp4")
+        let recDir = SnippingGeometry.defaultRecordingsDirectory(homeDirectory: URL(fileURLWithPath: "/Users/alice", isDirectory: true))
+        #expect(recDir.path == "/Users/alice/Movies/Screen Recordings")
+
+        #expect(SnippingGeometry.formatRecordingDuration(-4) == "00:00")
+        #expect(SnippingGeometry.formatRecordingDuration(5) == "00:05")
+        #expect(SnippingGeometry.formatRecordingDuration(75) == "01:15")
+        #expect(SnippingGeometry.formatRecordingDuration(3661) == "1:01:01")
+
+        #expect(SnippingGeometry.evenPixelDimension(100.2) == 100)
+        #expect(SnippingGeometry.evenPixelDimension(101.1) == 100)
+        #expect(SnippingGeometry.evenPixelDimension(101.8) == 102)
+        #expect(SnippingGeometry.evenPixelDimension(3) == 16)
     }
 }

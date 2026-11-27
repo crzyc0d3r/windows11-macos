@@ -22,7 +22,11 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AVKit"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreWLAN"),
                 .linkedFramework("IOKit"),

@@ -154,7 +154,17 @@ public final class WindowChromeBarController: NSObject {
     private var dragGhostCurrentWindowOriginAX: CGPoint = .zero
     private var dragGhostGrabOffsetAX: CGPoint = .zero
     private var dragMinSafeAXTop: CGFloat = 28
+    private nonisolated static let syntheticEventTag: Int64 = 0x57313153
+
+    private struct NativeDragGuard {
+        let pid: pid_t
+        let windowID: CGWindowID
+        let element: AXUIElement?
+        let startOrigin: CGPoint
+    }
+
     private var lastAutoNormalizedFrameByWindowID: [CGWindowID: CGRect] = [:]
+    private var nativeDragGuard: NativeDragGuard?
     private var mouseDragTap: CFMachPort?
     private var mouseDragRunLoopSource: CFRunLoopSource?
     private var snapDismissWork: DispatchWorkItem?
@@ -990,6 +1000,7 @@ public final class WindowChromeBarController: NSObject {
         isDraggingTargetWindow = false
         isExternalMouseDragging = false
         isBlockingNativeTitlebarDrag = false
+        nativeDragGuard = nil
         isFinishingDragDrop = false
         dragDidCrossThreshold = false
         dragDidStartVisualGhost = false
@@ -1107,6 +1118,10 @@ public final class WindowChromeBarController: NSObject {
             return Unmanaged.passUnretained(event)
         }
 
+        if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventTag {
+            return Unmanaged.passUnretained(event)
+        }
+
         guard Thread.isMainThread else {
             return Unmanaged.passUnretained(event)
         }
@@ -1198,6 +1213,7 @@ public final class WindowChromeBarController: NSObject {
 
     private func handleTapMouseDown(locationAX: CGPoint, clickCount: Int64) -> Bool {
         isBlockingNativeTitlebarDrag = false
+        nativeDragGuard = nil
 
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
@@ -1325,7 +1341,7 @@ public final class WindowChromeBarController: NSObject {
                         resizeBorder: 4
                     ) {
                         let hit = AccessibilityBridge.classifyTitlebarHit(atAXPoint: locationAX, pid: snap.pid)
-                        if hit == .trafficLight || hit == .nativeTitlebarDragSurface || hit == .unknown {
+                        if hit == .trafficLight || hit == .nativeTitlebarDragSurface {
                             isBlockingNativeTitlebarDrag = true
                             if snap.windowID != currentWindow?.windowID {
                                 let targetPID = snap.pid
@@ -1335,6 +1351,15 @@ public final class WindowChromeBarController: NSObject {
                                 }
                             }
                             return true
+                        } else if hit == .ambiguousContainer || hit == .unknown {
+                            let targetElement = (snap.windowID == currentWindow?.windowID) ? currentWindow?.element : nil
+                            nativeDragGuard = NativeDragGuard(
+                                pid: snap.pid,
+                                windowID: snap.windowID,
+                                element: targetElement,
+                                startOrigin: snap.axBounds.origin
+                            )
+                            return false
                         }
                     }
                 }
@@ -1397,6 +1422,46 @@ public final class WindowChromeBarController: NSObject {
     private func handleTapMouseDragged(locationAX: CGPoint) -> Bool {
         if isBlockingNativeTitlebarDrag {
             return true
+        }
+        if let guardInfo = nativeDragGuard {
+            if let live = AccessibilityBridge.liveWindowBounds(windowID: guardInfo.windowID),
+               hypot(live.origin.x - guardInfo.startOrigin.x, live.origin.y - guardInfo.startOrigin.y) >= 1.0 {
+                isBlockingNativeTitlebarDrag = true
+                nativeDragGuard = nil
+
+                let axEl = guardInfo.element ?? AccessibilityBridge.standardWindows(for: guardInfo.pid).first(where: { $0.windowID == guardInfo.windowID })?.element
+                if let axEl {
+                    AccessibilityBridge.setPosition(axEl, origin: guardInfo.startOrigin)
+                }
+
+                if let cancelUp = CGEvent(
+                    mouseEventSource: nil,
+                    mouseType: .leftMouseUp,
+                    mouseCursorPosition: locationAX,
+                    mouseButton: .left
+                ) {
+                    cancelUp.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventTag)
+                    cancelUp.post(tap: .cgSessionEventTap)
+                }
+
+                let startOrigin = guardInfo.startOrigin
+                let targetWID = guardInfo.windowID
+                let targetPID = guardInfo.pid
+                for delay in [0.015, 0.050] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        if let currentBounds = AccessibilityBridge.liveWindowBounds(windowID: targetWID),
+                           hypot(currentBounds.origin.x - startOrigin.x, currentBounds.origin.y - startOrigin.y) >= 1.0 {
+                            let el = axEl ?? AccessibilityBridge.standardWindows(for: targetPID).first(where: { $0.windowID == targetWID })?.element
+                            if let el {
+                                AccessibilityBridge.setPosition(el, origin: startOrigin)
+                            }
+                        }
+                        self?.syncActiveWindow()
+                    }
+                }
+                return true
+            }
+            return false
         }
         guard isDraggingTargetWindow, let win = dragTargetWindow else {
             return false
@@ -1515,6 +1580,7 @@ public final class WindowChromeBarController: NSObject {
     }
 
     private func handleTapMouseUp() -> Bool {
+        nativeDragGuard = nil
         if isBlockingNativeTitlebarDrag {
             isBlockingNativeTitlebarDrag = false
             return true

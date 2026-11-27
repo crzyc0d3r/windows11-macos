@@ -339,6 +339,7 @@ public enum WindowChromeGeometry {
         case trafficLight
         case interactiveControl
         case dragSurface
+        case ambiguousContainer
     }
 
     private static let trafficLightSubroles: Set<String> = [
@@ -379,6 +380,22 @@ public enum WindowChromeGeometry {
         "AXMenuBar"
     ]
 
+    private static let confirmedBareDragRoles: Set<String> = [
+        "AXWindow",
+        "AXToolbar",
+        "AXSplitGroup",
+        "AXScrollArea",
+        "AXMenuBar",
+        "AXApplication",
+        "AXStaticText"
+    ]
+
+    private static let ambiguousContainerRoles: Set<String> = [
+        "AXGroup",
+        "AXTabGroup",
+        "AXWebArea"
+    ]
+
     /// Estimates the height of a window's native macOS titlebar strip from its traffic-light button rect.
     public static func estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect?) -> CGFloat {
         if let rel = trafficLightRelativeRect, rel.maxY > 0 {
@@ -407,7 +424,8 @@ public enum WindowChromeGeometry {
     }
 
     /// Classifies an Accessibility element inside a window's native titlebar band into
-    /// traffic lights, interactive controls (tabs/buttons/inputs), or bare draggable titlebar surface.
+    /// traffic lights, interactive controls (tabs/buttons/inputs), confirmed bare titlebar surfaces,
+    /// or ambiguous nested container roles (such as Chromium Views `AXGroup` tab strips).
     public static func classifyTitlebarElement(
         role: String?,
         subrole: String?,
@@ -422,11 +440,14 @@ public enum WindowChromeGeometry {
         let hasPressAction = actions.contains("AXPress") || actions.contains("AXConfirm")
         if hasPressAction {
             if let role, nonInteractiveTitlebarContainerRoles.contains(role) {
-                return .dragSurface
+                return ambiguousContainerRoles.contains(role) ? .ambiguousContainer : .dragSurface
             }
             return .interactiveControl
         }
-        return .dragSurface
+        if let role, confirmedBareDragRoles.contains(role) {
+            return .dragSurface
+        }
+        return .ambiguousContainer
     }
 
     /// Returns the Cocoa screen rect for the top notch-bezel band when `safeAreaTopInset > 1` (e.g. 39pt on 38pt-notched MacBook Pro displays to cover MenuBarAgent).

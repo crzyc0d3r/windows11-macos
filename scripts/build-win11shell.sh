@@ -85,8 +85,10 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
     <string>Win11 Shell uses Apple Events to toggle macOS Dark Mode and trigger system power actions.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Win11 Shell displays Bluetooth status in Quick Settings and opens Bluetooth settings when requested.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Win11 Shell uses the microphone when microphone audio is enabled in Snipping Tool screen recordings.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Win11 Shell uses Screen Recording for live taskbar hover window thumbnails and Alt+Tab previews.</string>
+    <string>Win11 Shell uses Screen Recording for live taskbar hover window thumbnails, Alt+Tab previews, and Snipping Tool screenshots and screen recordings.</string>
 </dict>
 </plist>
 EOF

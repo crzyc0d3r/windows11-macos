@@ -292,8 +292,32 @@ struct Win11ShellCoreTests {
                 == .interactiveControl
         )
 
-        // Bare titlebar / web container / text drag surfaces
-        for role in ["AXGroup", "AXWebArea", "AXWindow", "AXToolbar", "AXTabGroup", "AXStaticText"] {
+        // Nested Chromium/Electron tab-strip containers classify as ambiguousContainer so clicks reach tabs while dragGuard blocks real window drags
+        for role in ["AXGroup", "AXWebArea", "AXTabGroup"] {
+            #expect(
+                WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXShowMenu"])
+                    == .ambiguousContainer
+            )
+            #expect(
+                WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: [])
+                    == .ambiguousContainer
+            )
+        }
+        for role in ["AXWebArea", "AXTabGroup"] {
+            #expect(
+                WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXPress"])
+                    == .ambiguousContainer
+            )
+        }
+
+        // Nil role and nil subrole without actions also classifies as ambiguousContainer
+        #expect(
+            WindowChromeGeometry.classifyTitlebarElement(role: nil, subrole: nil, actions: [])
+                == .ambiguousContainer
+        )
+
+        // Confirmed bare native titlebar surfaces stay fail-closed dragSurface
+        for role in ["AXWindow", "AXToolbar", "AXSplitGroup", "AXScrollArea", "AXMenuBar", "AXApplication", "AXStaticText"] {
             #expect(
                 WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXShowMenu"])
                     == .dragSurface
@@ -304,19 +328,12 @@ struct Win11ShellCoreTests {
             )
         }
 
-        // Even with AXPress on top-level container roles, keep dragSurface (fail-closed)
-        for role in ["AXWindow", "AXToolbar", "AXWebArea", "AXTabGroup", "AXScrollArea", "AXMenuBar"] {
+        for role in ["AXWindow", "AXToolbar", "AXSplitGroup", "AXScrollArea", "AXMenuBar", "AXApplication"] {
             #expect(
                 WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXPress"])
                     == .dragSurface
             )
         }
-
-        // Nil role and nil subrole without actions also classifies as dragSurface (fail-closed)
-        #expect(
-            WindowChromeGeometry.classifyTitlebarElement(role: nil, subrole: nil, actions: [])
-                == .dragSurface
-        )
     }
 
     @Test("Notch bezel frame covers top safe area band on notched displays and returns nil otherwise")

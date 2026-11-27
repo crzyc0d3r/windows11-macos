@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import AVKit
 import CoreGraphics
 import ImageIO
 import Observation
@@ -10,10 +12,16 @@ import Win11ShellCore
 @MainActor
 @Observable
 public final class SnippingToolState {
+    public var outputKind: SnipOutputKind = .photo
     public var mode: SnipCaptureMode = .rectangle
     public var delay: SnipDelayOption = .none
     public var isCapturing: Bool = false
     public var countdownRemaining: Int = 0
+    public var isRecordingArmed: Bool = false
+    public var isRecordingActive: Bool = false
+    public var recordingElapsed: TimeInterval = 0
+    public var captureSystemAudio: Bool = true
+    public var captureMicrophone: Bool = false
 }
 
 @MainActor
@@ -62,11 +70,23 @@ private final class SnipEditorState {
     var imagePixelSize: CGSize = .zero
     var history = SnipAnnotationHistory()
 
+    var videoURL: URL?
+    var videoDuration: TimeInterval = 0
+    var videoDimensions: CGSize = .zero
+    var isVideoPlaybackActive: Bool = false
+    var isVideoPreview: Bool { videoURL != nil }
+
     var activeTool: SnipToolKind = .pen
     var selectedPenColor: SnipColorRGB = .red
     var selectedHighlighterColor: SnipColorRGB = SnipColorRGB.highlighterPresets[0]
     var penWidth: CGFloat = 4
     var highlighterWidth: CGFloat = 18
+    var textFontSize: CGFloat = 24
+
+    var activeTextDraftOriginPx: CGPoint?
+    var activeTextDraft: String = ""
+    var activeTextDraftCanvasScale: CGFloat = 1.0
+    var isEditingText: Bool { activeTextDraftOriginPx != nil }
 
     var inProgressAnnotation: SnipAnnotation?
     var cropSelectionRect: CGRect?
@@ -87,18 +107,53 @@ private final class SnipEditorState {
     var activeLineWidth: CGFloat {
         activeTool == .highlighter ? highlighterWidth : penWidth
     }
+
+    @discardableResult
+    func commitTextDraft() -> Bool {
+        guard let origin = activeTextDraftOriginPx else { return false }
+        let trimmed = activeTextDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        activeTextDraftOriginPx = nil
+        activeTextDraft = ""
+        guard !trimmed.isEmpty else { return false }
+        let pixelFontSize = max(12, textFontSize * max(0.5, activeTextDraftCanvasScale))
+        history.append(SnipAnnotation(
+            kind: .text(origin: origin, text: trimmed, fontSize: pixelFontSize),
+            color: selectedPenColor,
+            lineWidth: 2
+        ))
+        return true
+    }
+
+    func cancelTextDraft() {
+        activeTextDraftOriginPx = nil
+        activeTextDraft = ""
+    }
 }
 
 @MainActor
 public final class SnippingToolController {
+    private struct PendingRecordingSpec {
+        let displayID: CGDirectDisplayID
+        let screenFrameCocoa: CGRect
+        let backingScale: CGFloat
+        let rectInDisplayPoints: CGRect
+    }
+
     private let model: RunningAppsModel
     private let sharedState = SnippingToolState()
     private let editorState = SnipEditorState()
+    private let videoRecorder = SnippingVideoRecorder()
 
     private var overlayPanels: [CGDirectDisplayID: FocusableFloatingPanel] = [:]
     private var overlayStates: [CGDirectDisplayID: SnipScreenOverlayState] = [:]
     private var countdownPanel: NonActivatingFloatingPanel?
+    private var recordingBorderPanel: NonActivatingFloatingPanel?
+    private var recordingHUDPanel: NonActivatingFloatingPanel?
     private var editorPanel: FocusableFloatingPanel?
+
+    private var pendingRecordingSpec: PendingRecordingSpec?
+    private var recordingTimer: Timer?
+    private var recordingStartUptime: TimeInterval = 0
 
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
@@ -111,9 +166,17 @@ public final class SnippingToolController {
     }
 
     public func openEditorOrCapture() {
-        if editorState.baseImage != nil, let editorPanel {
+        if sharedState.isRecordingArmed || sharedState.isRecordingActive {
+            recordingHUDPanel?.orderFrontRegardless()
+            return
+        }
+        if (editorState.baseImage != nil || editorState.videoURL != nil), let editorPanel {
+            if editorState.isVideoPreview {
+                editorState.isVideoPlaybackActive = true
+            }
             editorPanel.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            installEditorShortcutMonitor()
             return
         }
         beginCapture()
@@ -123,8 +186,25 @@ public final class SnippingToolController {
         if let mode {
             sharedState.mode = mode
         }
+        if sharedState.outputKind == .video && sharedState.mode == .freeform {
+            sharedState.mode = .rectangle
+        }
+        if sharedState.isRecordingActive {
+            Task { @MainActor [weak self] in
+                await self?.stopActiveVideoRecording()
+            }
+            return
+        }
+        if sharedState.isRecordingArmed {
+            cancelVideoRecording()
+        }
         if sharedState.isCapturing {
             cancelCapture()
+        }
+
+        editorState.commitTextDraft()
+        if editorState.isVideoPreview {
+            editorState.isVideoPlaybackActive = false
         }
 
         shouldRestoreEditorOnCancel = editorPanel?.isVisible ?? false
@@ -157,7 +237,7 @@ public final class SnippingToolController {
         removeCaptureKeyMonitors()
         NSCursor.arrow.set()
 
-        if shouldRestoreEditorOnCancel, editorState.baseImage != nil {
+        if shouldRestoreEditorOnCancel, (editorState.baseImage != nil || editorState.videoURL != nil) {
             shouldRestoreEditorOnCancel = false
             presentEditorPanel()
         }
@@ -299,6 +379,17 @@ public final class SnippingToolController {
             panel.contentView = NSHostingView(rootView: SnipOverlayView(
                 sharedState: sharedState,
                 screenState: state,
+                onSelectOutputKind: { [weak self] kind in
+                    guard let self else { return }
+                    self.sharedState.outputKind = kind
+                    if kind == .video && self.sharedState.mode == .freeform {
+                        self.sharedState.mode = .rectangle
+                    }
+                    state.dragStart = nil
+                    state.dragCurrent = nil
+                    state.freeformPoints.removeAll()
+                    state.hoveredWindowTarget = nil
+                },
                 onSelectMode: { [weak self] mode in
                     self?.sharedState.mode = mode
                     state.dragStart = nil
@@ -343,6 +434,27 @@ public final class SnippingToolController {
         rectInView: CGRect,
         freeformPolygon: [CGPoint]?
     ) {
+        if sharedState.outputKind == .video {
+            let bounds = CGRect(origin: .zero, size: overlayState.screenFrameCocoa.size)
+            let clipped = rectInView.intersection(bounds)
+            guard clipped.width >= 16, clipped.height >= 16 else {
+                cancelCapture()
+                return
+            }
+            let matchingScreen = NSScreen.screens.first {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == overlayState.displayID
+            }
+            let scale = min(2.0, matchingScreen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0)
+            tearDownOverlaysForCaptureCompletion()
+            armVideoRecording(
+                displayID: overlayState.displayID,
+                screenFrameCocoa: overlayState.screenFrameCocoa,
+                backingScale: scale,
+                rectInDisplayPoints: clipped
+            )
+            return
+        }
+
         let cropPixels = SnippingGeometry.pixelCropRect(
             selectionInViewPoints: rectInView,
             viewSize: overlayState.screenFrameCocoa.size,
@@ -388,9 +500,256 @@ public final class SnippingToolController {
     }
 
     private func completeFullscreenCapture(from overlayState: SnipScreenOverlayState) {
+        if sharedState.outputKind == .video {
+            let fullRect = CGRect(origin: .zero, size: overlayState.screenFrameCocoa.size)
+            completeCapture(from: overlayState, rectInView: fullRect, freeformPolygon: nil)
+            return
+        }
         let full = overlayState.frozenImage
         tearDownOverlaysForCaptureCompletion()
         deliverCapturedImage(full)
+    }
+
+    // MARK: - Video Screen Recording Flow
+
+    private func armVideoRecording(
+        displayID: CGDirectDisplayID,
+        screenFrameCocoa: CGRect,
+        backingScale: CGFloat,
+        rectInDisplayPoints: CGRect
+    ) {
+        pendingRecordingSpec = PendingRecordingSpec(
+            displayID: displayID,
+            screenFrameCocoa: screenFrameCocoa,
+            backingScale: backingScale,
+            rectInDisplayPoints: rectInDisplayPoints
+        )
+        sharedState.isRecordingArmed = true
+        sharedState.isRecordingActive = false
+        sharedState.recordingElapsed = 0
+
+        presentRecordingBorderPanel(screenFrameCocoa: screenFrameCocoa, rectInDisplayPoints: rectInDisplayPoints)
+        presentRecordingHUDPanel(screenFrameCocoa: screenFrameCocoa, rectInDisplayPoints: rectInDisplayPoints)
+        installArmedRecordingEscMonitor()
+    }
+
+    private func presentRecordingBorderPanel(screenFrameCocoa: CGRect, rectInDisplayPoints: CGRect) {
+        let pad: CGFloat = 4
+        let cocoaX = screenFrameCocoa.minX + rectInDisplayPoints.minX - pad
+        let cocoaY = screenFrameCocoa.maxY - rectInDisplayPoints.maxY - pad
+        let rawRect = NSRect(
+            x: cocoaX,
+            y: cocoaY,
+            width: rectInDisplayPoints.width + pad * 2,
+            height: rectInDisplayPoints.height + pad * 2
+        )
+        let clampedRect = rawRect.intersection(screenFrameCocoa)
+        guard !clampedRect.isNull, clampedRect.width >= 16, clampedRect.height >= 16 else { return }
+
+        let p: NonActivatingFloatingPanel
+        if let existing = recordingBorderPanel {
+            p = existing
+        } else {
+            let created = NonActivatingFloatingPanel(
+                contentRect: clampedRect,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            created.allowsNotchAreaPlacement = true
+            created.hidesOnDeactivate = false
+            created.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 3)
+            created.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+            created.backgroundColor = .clear
+            created.isOpaque = false
+            created.hasShadow = false
+            created.ignoresMouseEvents = true
+            created.contentView = NSHostingView(rootView: SnipRecordingRegionBorderView(state: sharedState))
+            recordingBorderPanel = created
+            p = created
+        }
+        p.setFrame(clampedRect, display: true)
+        p.orderFrontRegardless()
+    }
+
+    private func presentRecordingHUDPanel(screenFrameCocoa: CGRect, rectInDisplayPoints: CGRect) {
+        let hudSize = NSSize(width: 344, height: 48)
+        let rectTopCocoa = screenFrameCocoa.maxY - rectInDisplayPoints.minY
+        let rectMidXCocoa = screenFrameCocoa.minX + rectInDisplayPoints.midX
+        let maxHUDY = screenFrameCocoa.maxY - 46 - hudSize.height
+        let preferredAboveY = rectTopCocoa + 10
+        let hudY: CGFloat
+        if preferredAboveY <= maxHUDY {
+            hudY = preferredAboveY
+        } else {
+            hudY = max(screenFrameCocoa.minY + 56, min(maxHUDY, rectTopCocoa - hudSize.height - 12))
+        }
+        let hudX = max(screenFrameCocoa.minX + 12, min(screenFrameCocoa.maxX - hudSize.width - 12, rectMidXCocoa - hudSize.width / 2))
+        let hudFrame = NSRect(x: hudX, y: hudY, width: hudSize.width, height: hudSize.height)
+
+        let p: NonActivatingFloatingPanel
+        if let existing = recordingHUDPanel {
+            p = existing
+        } else {
+            let created = NonActivatingFloatingPanel(
+                contentRect: hudFrame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            created.allowsNotchAreaPlacement = true
+            created.hidesOnDeactivate = false
+            created.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 4)
+            created.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+            created.backgroundColor = .clear
+            created.isOpaque = false
+            created.hasShadow = true
+            created.appearance = NSAppearance(named: .darkAqua)
+            created.contentView = NSHostingView(rootView: SnipRecordingHUDView(
+                state: sharedState,
+                onStart: { [weak self] in self?.startArmedVideoRecording() },
+                onStop: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        await self?.stopActiveVideoRecording()
+                    }
+                },
+                onToggleAudio: { [weak self] in
+                    self?.sharedState.captureSystemAudio.toggle()
+                },
+                onToggleMic: { [weak self] in
+                    self?.sharedState.captureMicrophone.toggle()
+                },
+                onCancel: { [weak self] in self?.cancelVideoRecording() }
+            ))
+            recordingHUDPanel = created
+            p = created
+        }
+        p.setFrame(hudFrame, display: true)
+        p.orderFrontRegardless()
+    }
+
+    private func installArmedRecordingEscMonitor() {
+        removeCaptureKeyMonitors()
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.sharedState.isRecordingArmed, !self.sharedState.isRecordingActive else {
+                return event
+            }
+            if event.keyCode == 53 {
+                self.cancelVideoRecording()
+                return nil
+            }
+            return event
+        }
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 {
+                Task { @MainActor [weak self] in
+                    guard let self, self.sharedState.isRecordingArmed, !self.sharedState.isRecordingActive else { return }
+                    self.cancelVideoRecording()
+                }
+            }
+        }
+    }
+
+    private func startArmedVideoRecording() {
+        guard let spec = pendingRecordingSpec, !sharedState.isRecordingActive else { return }
+        removeCaptureKeyMonitors()
+
+        let fm = FileManager.default
+        let dir = SnippingGeometry.defaultRecordingsDirectory(homeDirectory: fm.homeDirectoryForCurrentUser)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let outputURL = dir.appendingPathComponent(SnippingGeometry.defaultRecordingFilename())
+
+        let excludedWindowIDs: Set<CGWindowID> = Set(
+            [recordingBorderPanel, recordingHUDPanel, editorPanel, countdownPanel]
+                .compactMap { $0 }
+                .filter { $0.windowNumber > 0 }
+                .map { CGWindowID($0.windowNumber) }
+        )
+
+        let captureSystemAudio = sharedState.captureSystemAudio
+        let captureMicrophone = sharedState.captureMicrophone
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.videoRecorder.startRecording(
+                    displayID: spec.displayID,
+                    sourceRectInDisplayPoints: spec.rectInDisplayPoints,
+                    backingScale: spec.backingScale,
+                    outputURL: outputURL,
+                    captureSystemAudio: captureSystemAudio,
+                    captureMicrophone: captureMicrophone,
+                    excludedWindowIDs: excludedWindowIDs,
+                    onUnexpectedError: { [weak self] message in
+                        guard let self else { return }
+                        ShellLogger.log("SnippingTool unexpected recording error: \(message)")
+                        self.tearDownRecordingUI()
+                        self.showToast("Recording error: \(message)")
+                        self.presentEditorPanel()
+                    }
+                )
+                self.sharedState.isRecordingActive = true
+                self.sharedState.recordingElapsed = 0
+                self.recordingStartUptime = ProcessInfo.processInfo.systemUptime
+                self.recordingTimer?.invalidate()
+                self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.sharedState.isRecordingActive else { return }
+                        self.sharedState.recordingElapsed = max(0, ProcessInfo.processInfo.systemUptime - self.recordingStartUptime)
+                    }
+                }
+            } catch {
+                ShellLogger.log("SnippingTool recording start failed: \(error.localizedDescription)")
+                self.tearDownRecordingUI()
+                self.showToast("Recording failed: \(error.localizedDescription)")
+                self.presentEditorPanel()
+            }
+        }
+    }
+
+    private func stopActiveVideoRecording() async {
+        guard sharedState.isRecordingActive else { return }
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        do {
+            let outputURL = try await videoRecorder.stopRecording()
+            tearDownRecordingUI()
+            await deliverRecordedVideo(url: outputURL)
+        } catch {
+            ShellLogger.log("SnippingTool stop recording failed: \(error.localizedDescription)")
+            tearDownRecordingUI()
+            showToast("Recording failed: \(error.localizedDescription)")
+            presentEditorPanel()
+        }
+    }
+
+    private func cancelVideoRecording() {
+        removeCaptureKeyMonitors()
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        let wasActive = sharedState.isRecordingActive
+        tearDownRecordingUI()
+        if wasActive || videoRecorder.isRecording {
+            Task { @MainActor [weak self] in
+                await self?.videoRecorder.cancelRecording()
+            }
+        }
+        if shouldRestoreEditorOnCancel, (editorState.baseImage != nil || editorState.videoURL != nil) {
+            shouldRestoreEditorOnCancel = false
+            presentEditorPanel()
+        }
+    }
+
+    private func tearDownRecordingUI() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        recordingBorderPanel?.orderOut(nil)
+        recordingHUDPanel?.orderOut(nil)
+        sharedState.isRecordingActive = false
+        sharedState.isRecordingArmed = false
+        sharedState.recordingElapsed = 0
+        pendingRecordingSpec = nil
     }
 
     private func tearDownOverlaysForCaptureCompletion() {
@@ -409,6 +768,12 @@ public final class SnippingToolController {
     }
 
     private func deliverCapturedImage(_ image: CGImage) {
+        editorState.videoURL = nil
+        editorState.videoDuration = 0
+        editorState.videoDimensions = .zero
+        editorState.isVideoPlaybackActive = false
+        editorState.cancelTextDraft()
+
         editorState.baseImage = image
         editorState.imagePixelSize = CGSize(width: image.width, height: image.height)
         editorState.displayImage = NSImage(cgImage: image, size: CGSize(width: CGFloat(image.width) / 2.0, height: CGFloat(image.height) / 2.0))
@@ -420,10 +785,46 @@ public final class SnippingToolController {
         editorState.showOCRDrawer = false
         editorState.ocrStatusMessage = nil
 
-        copyCurrentCompositeToPasteboard()
+        copyCurrentAssetToPasteboard()
         let savedURL = autoSaveScreenshot(image: image)
         editorState.savedFileURL = savedURL
         showToast(savedURL != nil ? "Copied to clipboard • Saved to Pictures/Screenshots" : "Copied to clipboard")
+        presentEditorPanel()
+    }
+
+    private func deliverRecordedVideo(url: URL) async {
+        editorState.baseImage = nil
+        editorState.displayImage = nil
+        editorState.imagePixelSize = .zero
+        editorState.history.resetAll()
+        editorState.inProgressAnnotation = nil
+        editorState.cropSelectionRect = nil
+        editorState.cropDragStart = nil
+        editorState.cancelTextDraft()
+        editorState.recognizedLines = []
+        editorState.showOCRDrawer = false
+        editorState.ocrStatusMessage = nil
+
+        let asset = AVURLAsset(url: url)
+        let durationSeconds = (try? await asset.load(.duration).seconds) ?? 0
+        let naturalSize: CGSize
+        if let track = try? await asset.loadTracks(withMediaType: .video).first,
+           let size = try? await track.load(.naturalSize),
+           let transform = try? await track.load(.preferredTransform) {
+            let transformed = size.applying(transform)
+            naturalSize = CGSize(width: abs(transformed.width), height: abs(transformed.height))
+        } else {
+            naturalSize = .zero
+        }
+
+        editorState.videoURL = url
+        editorState.videoDuration = durationSeconds.isFinite ? max(0, durationSeconds) : 0
+        editorState.videoDimensions = naturalSize
+        editorState.savedFileURL = url
+        editorState.isVideoPlaybackActive = true
+
+        copyCurrentAssetToPasteboard()
+        showToast("Video saved to Movies/Screen Recordings • Copied file")
         presentEditorPanel()
     }
 
@@ -498,15 +899,28 @@ public final class SnippingToolController {
                 editorState: editorState,
                 onNewSnip: { [weak self] in self?.beginCapture() },
                 onCopy: { [weak self] in
-                    self?.copyCurrentCompositeToPasteboard()
-                    self?.showToast("Copied to clipboard")
+                    guard let self else { return }
+                    self.editorState.commitTextDraft()
+                    self.copyCurrentAssetToPasteboard()
+                    self.showToast(self.editorState.isVideoPreview ? "Copied video file" : "Copied to clipboard")
                 },
-                onSaveAs: { [weak self] in self?.saveAsWithDialog() },
-                onOpenFolder: { [weak self] in self?.revealScreenshotsFolder() },
+                onSaveAs: { [weak self] in
+                    guard let self else { return }
+                    self.editorState.commitTextDraft()
+                    self.saveAsWithDialog()
+                },
+                onOpenFolder: { [weak self] in self?.revealOutputFolder() },
                 onApplyCrop: { [weak self] rectInPoints, canvasPointSize in
+                    self?.editorState.commitTextDraft()
                     self?.applyCrop(rectInPoints: rectInPoints, canvasPointSize: canvasPointSize)
                 },
-                onRunOCR: { [weak self] in self?.runTextRecognition() },
+                onCommitTextAnnotation: { [weak self] in
+                    self?.copyCurrentAssetToPasteboard()
+                },
+                onRunOCR: { [weak self] in
+                    self?.editorState.commitTextDraft()
+                    self?.runTextRecognition()
+                },
                 onCopyOCRText: { [weak self] in self?.copyRecognizedText() },
                 onMinimize: { [weak p] in p?.miniaturize(nil) },
                 onZoomToggle: { [weak p] in p?.zoom(nil) },
@@ -523,12 +937,17 @@ public final class SnippingToolController {
             editorPanel = p
         }
 
+        if editorState.isVideoPreview {
+            editorState.isVideoPlaybackActive = true
+        }
         editorPanel?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         installEditorShortcutMonitor()
     }
 
     private func closeEditor() {
+        editorState.cancelTextDraft()
+        editorState.isVideoPlaybackActive = false
         editorPanel?.orderOut(nil)
         removeCaptureKeyMonitors()
     }
@@ -557,7 +976,7 @@ public final class SnippingToolController {
         editorState.activeTool = .pen
         editorState.recognizedLines = []
         editorState.showOCRDrawer = false
-        copyCurrentCompositeToPasteboard()
+        copyCurrentAssetToPasteboard()
         showToast("Cropped • Copied to clipboard")
     }
 
@@ -615,7 +1034,13 @@ public final class SnippingToolController {
         )
     }
 
-    private func copyCurrentCompositeToPasteboard() {
+    private func copyCurrentAssetToPasteboard() {
+        if let videoURL = editorState.videoURL {
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.writeObjects([videoURL as NSURL])
+            return
+        }
         guard let cg = renderedCompositeCGImage(),
               let pngData = SnipImageRenderer.pngData(for: cg)
         else {
@@ -647,6 +1072,36 @@ public final class SnippingToolController {
     }
 
     private func saveAsWithDialog() {
+        if let sourceVideoURL = editorState.videoURL {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.mpeg4Movie]
+            panel.canCreateDirectories = true
+            panel.directoryURL = sourceVideoURL.deletingLastPathComponent()
+            panel.nameFieldStringValue = sourceVideoURL.lastPathComponent
+
+            if let editorPanel {
+                panel.beginSheetModal(for: editorPanel) { [weak self] response in
+                    guard response == .OK, let destURL = panel.url else { return }
+                    Task { @MainActor [weak self] in
+                        do {
+                            let fm = FileManager.default
+                            if destURL != sourceVideoURL {
+                                if fm.fileExists(atPath: destURL.path) {
+                                    try fm.removeItem(at: destURL)
+                                }
+                                try fm.copyItem(at: sourceVideoURL, to: destURL)
+                            }
+                            self?.editorState.savedFileURL = destURL
+                            self?.showToast("Saved \(destURL.lastPathComponent)")
+                        } catch {
+                            self?.showToast("Save failed: \(error.localizedDescription)")
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         guard let cg = renderedCompositeCGImage(),
               let png = SnipImageRenderer.pngData(for: cg)
         else {
@@ -678,8 +1133,15 @@ public final class SnippingToolController {
         }
     }
 
-    private func revealScreenshotsFolder() {
-        let dir = SnippingGeometry.defaultScreenshotsDirectory(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+    private func revealOutputFolder() {
+        let dir: URL
+        if let saved = editorState.savedFileURL {
+            dir = saved.deletingLastPathComponent()
+        } else if editorState.isVideoPreview || sharedState.outputKind == .video {
+            dir = SnippingGeometry.defaultRecordingsDirectory(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+        } else {
+            dir = SnippingGeometry.defaultScreenshotsDirectory(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: model.config.fileExplorerBundleID) {
             let cfg = NSWorkspace.OpenConfiguration()
@@ -727,6 +1189,29 @@ public final class SnippingToolController {
                 return event
             }
             let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+            let isTypingText = self.editorState.isEditingText || (panel.firstResponder is NSTextView)
+            if isTypingText {
+                if event.keyCode == 53 {
+                    self.editorState.cancelTextDraft()
+                    return nil
+                }
+                if flags == .command {
+                    switch event.keyCode {
+                    case 1: // Cmd+S
+                        self.editorState.commitTextDraft()
+                        self.saveAsWithDialog()
+                        return nil
+                    case 45: // Cmd+N
+                        self.editorState.commitTextDraft()
+                        self.beginCapture()
+                        return nil
+                    default:
+                        break
+                    }
+                }
+                return event
+            }
+
             if event.keyCode == 53 {
                 if self.editorState.cropSelectionRect != nil {
                     self.editorState.cropSelectionRect = nil
@@ -742,14 +1227,14 @@ public final class SnippingToolController {
             if flags == .command {
                 switch event.keyCode {
                 case 8: // C
-                    self.copyCurrentCompositeToPasteboard()
-                    self.showToast("Copied to clipboard")
+                    self.copyCurrentAssetToPasteboard()
+                    self.showToast(self.editorState.isVideoPreview ? "Copied video file" : "Copied to clipboard")
                     return nil
                 case 1: // S
                     self.saveAsWithDialog()
                     return nil
                 case 6: // Z
-                    if self.editorState.history.undo() { return nil }
+                    if !self.editorState.isVideoPreview, self.editorState.history.undo() { return nil }
                 case 45: // N
                     self.beginCapture()
                     return nil
@@ -757,7 +1242,7 @@ public final class SnippingToolController {
                     break
                 }
             } else if flags == [.command, .shift], event.keyCode == 6 {
-                if self.editorState.history.redo() { return nil }
+                if !self.editorState.isVideoPreview, self.editorState.history.redo() { return nil }
             }
             return event
         }
@@ -783,6 +1268,7 @@ public final class SnippingToolController {
 // MARK: - High-DPI Compositor
 
 public enum SnipImageRenderer {
+    @MainActor
     public static func renderComposite(baseImage: CGImage, annotations: [SnipAnnotation]) -> CGImage? {
         guard !annotations.isEmpty else { return baseImage }
 
@@ -818,6 +1304,7 @@ public enum SnipImageRenderer {
         return ctx.makeImage() ?? baseImage
     }
 
+    @MainActor
     private static func drawAnnotation(_ annotation: SnipAnnotation, in ctx: CGContext) {
         let c = annotation.color
         let cgColor = CGColor(
@@ -877,6 +1364,16 @@ public enum SnipImageRenderer {
 
         case .rectangle(let rect):
             ctx.stroke(rect.standardized)
+
+        case .text(let origin, let text, let fontSize):
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: fontSize, weight: .semibold),
+                .foregroundColor: NSColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: c.a)
+            ]
+            (text as NSString).draw(at: origin, withAttributes: attrs)
+            NSGraphicsContext.restoreGraphicsState()
         }
 
         ctx.restoreGState()
@@ -892,6 +1389,130 @@ public enum SnipImageRenderer {
             return nil
         }
         return data as Data
+    }
+}
+
+// MARK: - Recording Overlay Border & HUD Pill
+
+private struct SnipRecordingRegionBorderView: View {
+    let state: SnippingToolState
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .strokeBorder(
+                state.isRecordingActive ? Color.red.opacity(0.92) : Color.cyan.opacity(0.92),
+                style: StrokeStyle(lineWidth: 2.5, dash: state.isRecordingActive ? [] : [8, 5])
+            )
+            .padding(1)
+    }
+}
+
+private struct SnipRecordingHUDView: View {
+    let state: SnippingToolState
+    let onStart: () -> Void
+    let onStop: () -> Void
+    let onToggleAudio: () -> Void
+    let onToggleMic: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            SnipWindowDragHandle(onDoubleClick: {})
+                .frame(width: 14, height: 30)
+                .overlay(
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .allowsHitTesting(false)
+                )
+
+            if state.isRecordingActive {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 9, height: 9)
+                    Text(SnippingGeometry.formatRecordingDuration(state.recordingElapsed))
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
+
+                Button(action: onStop) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 10.5))
+                        Text("Stop")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color(red: 0.85, green: 0.20, blue: 0.18)))
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button(action: onStart) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 8, height: 8)
+                        Text("Start")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Color(red: 0.85, green: 0.20, blue: 0.18)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button(action: onToggleAudio) {
+                Image(systemName: state.captureSystemAudio ? "speaker.wave.2.fill" : "speaker.slash")
+                    .font(.system(size: 12))
+                    .foregroundStyle(state.captureSystemAudio ? .cyan : .white.opacity(0.5))
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(state.captureSystemAudio ? 0.14 : 0.06)))
+            }
+            .buttonStyle(.plain)
+            .disabled(state.isRecordingActive)
+            .help(state.captureSystemAudio ? "System audio enabled" : "System audio muted")
+
+            Button(action: onToggleMic) {
+                Image(systemName: state.captureMicrophone ? "mic.fill" : "mic.slash")
+                    .font(.system(size: 12))
+                    .foregroundStyle(state.captureMicrophone ? .cyan : .white.opacity(0.5))
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(state.captureMicrophone ? 0.14 : 0.06)))
+            }
+            .buttonStyle(.plain)
+            .disabled(state.isRecordingActive)
+            .help(state.captureMicrophone ? "Microphone enabled" : "Microphone muted")
+
+            Button(action: onCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .help(state.isRecordingActive ? "Discard recording" : "Cancel (Esc)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(width: 344, height: 48)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(red: 0.12, green: 0.12, blue: 0.14).opacity(0.96))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                )
+        )
+        .shadow(color: Color.black.opacity(0.55), radius: 14, x: 0, y: 6)
     }
 }
 
@@ -938,6 +1559,7 @@ private struct SnipCountdownPillView: View {
 private struct SnipOverlayView: View {
     let sharedState: SnippingToolState
     @Bindable var screenState: SnipScreenOverlayState
+    let onSelectOutputKind: (SnipOutputKind) -> Void
     let onSelectMode: (SnipCaptureMode) -> Void
     let onCycleDelay: () -> Void
     let onCommitRect: (CGRect) -> Void
@@ -984,6 +1606,8 @@ private struct SnipOverlayView: View {
             Canvas { ctx, canvasSize in
                 ctx.fill(Path(CGRect(origin: .zero, size: canvasSize)), with: .color(Color.black.opacity(0.46)))
 
+                let borderColor: Color = sharedState.outputKind == .video ? .red.opacity(0.90) : .cyan.opacity(0.75)
+
                 if let rect = activeSelectionRect {
                     ctx.blendMode = .destinationOut
                     ctx.fill(Path(rect), with: .color(.black))
@@ -995,10 +1619,10 @@ private struct SnipOverlayView: View {
                     )
                     ctx.stroke(
                         Path(rect.insetBy(dx: -1, dy: -1)),
-                        with: .color(.cyan.opacity(0.75)),
-                        lineWidth: 1
+                        with: .color(borderColor),
+                        lineWidth: 1.25
                     )
-                } else if sharedState.mode == .freeform && screenState.freeformPoints.count >= 2 {
+                } else if sharedState.outputKind == .photo && sharedState.mode == .freeform && screenState.freeformPoints.count >= 2 {
                     var lasso = Path()
                     lasso.addLines(screenState.freeformPoints)
                     if screenState.freeformPoints.count >= 3 {
@@ -1062,8 +1686,10 @@ private struct SnipOverlayView: View {
 
             // Windows 11 Floating Top Mode Bar (placed cleanly below camera notch)
             SnipModeFloatingToolbar(
+                outputKind: sharedState.outputKind,
                 mode: sharedState.mode,
                 delay: sharedState.delay,
+                onSelectOutputKind: onSelectOutputKind,
                 onSelectMode: { chosen in
                     if chosen == .fullscreen && sharedState.mode == .fullscreen {
                         onCommitFullscreen()
@@ -1160,8 +1786,10 @@ private struct SnipOverlayView: View {
 }
 
 private struct SnipModeFloatingToolbar: View {
+    let outputKind: SnipOutputKind
     let mode: SnipCaptureMode
     let delay: SnipDelayOption
+    let onSelectOutputKind: (SnipOutputKind) -> Void
     let onSelectMode: (SnipCaptureMode) -> Void
     let onCycleDelay: () -> Void
     let onFullscreenNow: () -> Void
@@ -1169,7 +1797,35 @@ private struct SnipModeFloatingToolbar: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(SnipCaptureMode.allCases, id: \.self) { m in
+            // Photo vs Video capture mode toggle (Windows 11 24H2 Snipping Tool style)
+            ForEach(SnipOutputKind.allCases, id: \.self) { kind in
+                Button {
+                    onSelectOutputKind(kind)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: kind.systemSymbolName)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(kind.displayTitle)
+                            .font(.system(size: 11.5, weight: outputKind == kind ? .semibold : .regular))
+                    }
+                    .foregroundStyle(outputKind == kind ? .white : .white.opacity(0.75))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(outputKind == kind
+                                ? (kind == .video ? Color(red: 0.85, green: 0.20, blue: 0.18) : Color.accentColor.opacity(0.85))
+                                : Color.white.opacity(0.06))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Divider()
+                .frame(height: 18)
+                .padding(.horizontal, 4)
+
+            ForEach(SnipCaptureMode.supportedModes(for: outputKind), id: \.self) { m in
                 Button {
                     onSelectMode(m)
                 } label: {
@@ -1363,6 +2019,7 @@ private struct SnippingEditorView: View {
     let onSaveAs: () -> Void
     let onOpenFolder: () -> Void
     let onApplyCrop: (CGRect, CGSize) -> Void
+    let onCommitTextAnnotation: () -> Void
     let onRunOCR: () -> Void
     let onCopyOCRText: () -> Void
     let onMinimize: () -> Void
@@ -1370,6 +2027,13 @@ private struct SnippingEditorView: View {
     let onClose: () -> Void
 
     @State private var lastCanvasPointSize: CGSize = .zero
+
+    private let textSizePresets: [(label: String, size: CGFloat)] = [
+        ("S", 16),
+        ("M", 24),
+        ("L", 36),
+        ("XL", 48)
+    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1380,7 +2044,16 @@ private struct SnippingEditorView: View {
             ZStack(alignment: .top) {
                 Color(red: 0.085, green: 0.088, blue: 0.10)
 
-                if let displayImage = editorState.displayImage {
+                if let videoURL = editorState.videoURL, editorState.isVideoPlaybackActive {
+                    SnipVideoPlayerView(url: videoURL)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                        )
+                        .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 6)
+                        .padding(16)
+                } else if let displayImage = editorState.displayImage {
                     GeometryReader { geo in
                         let canvasSize = fittedCanvasSize(
                             imagePixels: editorState.imagePixelSize,
@@ -1395,14 +2068,19 @@ private struct SnippingEditorView: View {
                         }
                         .frame(width: geo.size.width, height: geo.size.height)
                         .onAppear { lastCanvasPointSize = canvasSize }
-                        .onChange(of: canvasSize) { _, newSize in lastCanvasPointSize = newSize }
+                        .onChange(of: canvasSize) { _, newSize in
+                            lastCanvasPointSize = newSize
+                            if newSize.width > 0 {
+                                editorState.activeTextDraftCanvasScale = editorState.imagePixelSize.width / newSize.width
+                            }
+                        }
                     }
                 } else {
                     VStack(spacing: 12) {
-                        Image(systemName: "scissors")
+                        Image(systemName: sharedState.outputKind == .video ? "video" : "scissors")
                             .font(.system(size: 36, weight: .light))
                             .foregroundStyle(.secondary)
-                        Text("Press Win+Shift+S or click + New to capture a snip")
+                        Text("Press Win+Shift+S or click + New to capture a snip or screen recording")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                     }
@@ -1425,11 +2103,11 @@ private struct SnippingEditorView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if editorState.cropSelectionRect != nil && editorState.activeTool == .crop {
+            if !editorState.isVideoPreview && editorState.cropSelectionRect != nil && editorState.activeTool == .crop {
                 cropActionBar
             }
 
-            if editorState.showOCRDrawer {
+            if !editorState.isVideoPreview && editorState.showOCRDrawer {
                 ocrDrawer
             }
         }
@@ -1444,13 +2122,20 @@ private struct SnippingEditorView: View {
     private var titlebar: some View {
         HStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "scissors")
+                Image(systemName: editorState.isVideoPreview ? "video.fill" : "scissors")
                     .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(editorState.isVideoPreview ? .red : .cyan)
                 Text("Snipping Tool")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.9))
-                if editorState.imagePixelSize.width > 0 {
+                if editorState.isVideoPreview {
+                    let dimText = editorState.videoDimensions.width > 0
+                        ? "\(Int(editorState.videoDimensions.width)) × \(Int(editorState.videoDimensions.height)) • "
+                        : ""
+                    Text("\(dimText)\(SnippingGeometry.formatRecordingDuration(editorState.videoDuration))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                } else if editorState.imagePixelSize.width > 0 {
                     Text("\(Int(editorState.imagePixelSize.width)) × \(Int(editorState.imagePixelSize.height)) px")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Color.white.opacity(0.5))
@@ -1475,7 +2160,7 @@ private struct SnippingEditorView: View {
         HStack(spacing: 6) {
             Button(action: onNewSnip) {
                 HStack(spacing: 5) {
-                    Image(systemName: "plus")
+                    Image(systemName: sharedState.outputKind == .video ? "record.circle" : "plus")
                         .font(.system(size: 11.5, weight: .bold))
                     Text("New")
                         .font(.system(size: 12, weight: .semibold))
@@ -1485,14 +2170,40 @@ private struct SnippingEditorView: View {
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.accentColor)
+                        .fill(sharedState.outputKind == .video ? Color(red: 0.85, green: 0.20, blue: 0.18) : Color.accentColor)
                 )
             }
             .buttonStyle(.plain)
-            .help("New Snip (Cmd+N / Win+Shift+S)")
+            .help("New Capture (Cmd+N / Win+Shift+S)")
+
+            HStack(spacing: 2) {
+                ForEach(SnipOutputKind.allCases, id: \.self) { kind in
+                    Button {
+                        sharedState.outputKind = kind
+                        if kind == .video && sharedState.mode == .freeform {
+                            sharedState.mode = .rectangle
+                        }
+                    } label: {
+                        Image(systemName: kind.systemSymbolName)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(sharedState.outputKind == kind ? .white : .white.opacity(0.65))
+                            .frame(width: 26, height: 24)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(sharedState.outputKind == kind
+                                        ? (kind == .video ? Color(red: 0.85, green: 0.20, blue: 0.18) : Color.white.opacity(0.18))
+                                        : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(kind == .photo ? "Photo Snip Mode" : "Screen Video Recording Mode")
+                }
+            }
+            .padding(2)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.06)))
 
             Menu {
-                ForEach(SnipCaptureMode.allCases, id: \.self) { m in
+                ForEach(SnipCaptureMode.supportedModes(for: sharedState.outputKind), id: \.self) { m in
                     Button {
                         sharedState.mode = m
                     } label: {
@@ -1524,101 +2235,149 @@ private struct SnippingEditorView: View {
 
             Divider().frame(height: 20).padding(.horizontal, 2)
 
-            ForEach(SnipToolKind.allCases, id: \.self) { tool in
-                Button {
-                    editorState.activeTool = tool
-                    if tool != .crop {
-                        editorState.cropSelectionRect = nil
-                        editorState.cropDragStart = nil
+            if editorState.isVideoPreview {
+                HStack(spacing: 6) {
+                    Text("MP4 Video")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+                    if let name = editorState.savedFileURL?.lastPathComponent {
+                        Text(name)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.55))
+                            .lineLimit(1)
                     }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.06)))
+
+                Spacer()
+            } else {
+                ForEach(SnipToolKind.allCases, id: \.self) { tool in
+                    Button {
+                        if editorState.commitTextDraft() {
+                            onCommitTextAnnotation()
+                        }
+                        editorState.activeTool = tool
+                        if tool != .crop {
+                            editorState.cropSelectionRect = nil
+                            editorState.cropDragStart = nil
+                        }
+                    } label: {
+                        Image(systemName: tool.systemSymbolName)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(editorState.activeTool == tool ? .cyan : .white.opacity(0.82))
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(editorState.activeTool == tool ? Color.white.opacity(0.16) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(tool.displayTitle)
+                }
+
+                // Color swatches for Pen/Arrow/Rect/Text or Highlighter
+                if editorState.activeTool != .eraser && editorState.activeTool != .crop {
+                    let presets = editorState.activeTool == .highlighter
+                        ? SnipColorRGB.highlighterPresets
+                        : SnipColorRGB.penPresets
+                    HStack(spacing: 4) {
+                        ForEach(presets, id: \.self) { swatch in
+                            let isSelected = editorState.activeColor == swatch
+                            Button {
+                                if editorState.activeTool == .highlighter {
+                                    editorState.selectedHighlighterColor = swatch
+                                } else {
+                                    editorState.selectedPenColor = swatch
+                                }
+                            } label: {
+                                Circle()
+                                    .fill(Color(red: swatch.r, green: swatch.g, blue: swatch.b, opacity: min(1.0, swatch.a + 0.35)))
+                                    .frame(width: 14, height: 14)
+                                    .overlay(
+                                        Circle()
+                                            .strokeBorder(isSelected ? Color.white : Color.white.opacity(0.25), lineWidth: isSelected ? 2 : 0.75)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+
+                // Text size picker when Text tool is active
+                if editorState.activeTool == .text {
+                    HStack(spacing: 3) {
+                        ForEach(textSizePresets, id: \.size) { preset in
+                            let selected = abs(editorState.textFontSize - preset.size) < 0.5
+                            Button {
+                                editorState.textFontSize = preset.size
+                            } label: {
+                                Text(preset.label)
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(selected ? .cyan : .white.opacity(0.75))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                            .fill(selected ? Color.white.opacity(0.16) : Color.white.opacity(0.06))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Text size \(Int(preset.size))pt")
+                        }
+                    }
+                }
+
+                Divider().frame(height: 20).padding(.horizontal, 2)
+
+                Button {
+                    editorState.cancelTextDraft()
+                    _ = editorState.history.undo()
                 } label: {
-                    Image(systemName: tool.systemSymbolName)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(editorState.activeTool == tool ? .cyan : .white.opacity(0.82))
-                        .frame(width: 30, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(editorState.activeTool == tool ? Color.white.opacity(0.16) : Color.clear)
-                        )
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(editorState.history.canUndo ? .white : .white.opacity(0.32))
+                        .frame(width: 26, height: 28)
                 }
                 .buttonStyle(.plain)
-                .help(tool.displayTitle)
-            }
+                .disabled(!editorState.history.canUndo)
+                .help("Undo (Cmd+Z)")
 
-            // Color swatches for Pen/Arrow/Rect or Highlighter
-            if editorState.activeTool != .eraser && editorState.activeTool != .crop {
-                let presets = editorState.activeTool == .highlighter
-                    ? SnipColorRGB.highlighterPresets
-                    : SnipColorRGB.penPresets
-                HStack(spacing: 4) {
-                    ForEach(presets, id: \.self) { swatch in
-                        let isSelected = editorState.activeColor == swatch
-                        Button {
-                            if editorState.activeTool == .highlighter {
-                                editorState.selectedHighlighterColor = swatch
-                            } else {
-                                editorState.selectedPenColor = swatch
-                            }
-                        } label: {
-                            Circle()
-                                .fill(Color(red: swatch.r, green: swatch.g, blue: swatch.b, opacity: min(1.0, swatch.a + 0.35)))
-                                .frame(width: 14, height: 14)
-                                .overlay(
-                                    Circle()
-                                        .strokeBorder(isSelected ? Color.white : Color.white.opacity(0.25), lineWidth: isSelected ? 2 : 0.75)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 4)
-            }
-
-            Divider().frame(height: 20).padding(.horizontal, 2)
-
-            Button {
-                _ = editorState.history.undo()
-            } label: {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(editorState.history.canUndo ? .white : .white.opacity(0.32))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .disabled(!editorState.history.canUndo)
-            .help("Undo (Cmd+Z)")
-
-            Button {
-                _ = editorState.history.redo()
-            } label: {
-                Image(systemName: "arrow.uturn.forward")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(editorState.history.canRedo ? .white : .white.opacity(0.32))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .disabled(!editorState.history.canRedo)
-            .help("Redo (Cmd+Shift+Z)")
-
-            Spacer()
-
-            Button(action: onRunOCR) {
-                HStack(spacing: 4) {
-                    Image(systemName: "text.viewfinder")
+                Button {
+                    editorState.cancelTextDraft()
+                    _ = editorState.history.redo()
+                } label: {
+                    Image(systemName: "arrow.uturn.forward")
                         .font(.system(size: 12.5))
-                    Text("Text actions")
-                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(editorState.history.canRedo ? .white : .white.opacity(0.32))
+                        .frame(width: 26, height: 28)
                 }
-                .foregroundStyle(editorState.showOCRDrawer ? .cyan : .white.opacity(0.9))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(editorState.showOCRDrawer ? Color.cyan.opacity(0.18) : Color.white.opacity(0.08))
-                )
+                .buttonStyle(.plain)
+                .disabled(!editorState.history.canRedo)
+                .help("Redo (Cmd+Shift+Z)")
+
+                Spacer()
+
+                Button(action: onRunOCR) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "text.viewfinder")
+                            .font(.system(size: 12.5))
+                        Text("Text actions")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .foregroundStyle(editorState.showOCRDrawer ? .cyan : .white.opacity(0.9))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(editorState.showOCRDrawer ? Color.cyan.opacity(0.18) : Color.white.opacity(0.08))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(editorState.baseImage == nil)
             }
-            .buttonStyle(.plain)
-            .disabled(editorState.baseImage == nil)
 
             Button(action: onCopy) {
                 HStack(spacing: 4) {
@@ -1633,8 +2392,8 @@ private struct SnippingEditorView: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
-            .disabled(editorState.baseImage == nil)
-            .help("Copy image (Cmd+C)")
+            .disabled(editorState.baseImage == nil && editorState.videoURL == nil)
+            .help("Copy (Cmd+C)")
 
             Button(action: onSaveAs) {
                 HStack(spacing: 4) {
@@ -1649,8 +2408,8 @@ private struct SnippingEditorView: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
-            .disabled(editorState.baseImage == nil)
-            .help("Save As PNG (Cmd+S)")
+            .disabled(editorState.baseImage == nil && editorState.videoURL == nil)
+            .help("Save As (Cmd+S)")
 
             Button(action: onOpenFolder) {
                 Image(systemName: "folder")
@@ -1660,7 +2419,7 @@ private struct SnippingEditorView: View {
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
-            .help("Open ~/Pictures/Screenshots")
+            .help(editorState.isVideoPreview ? "Open ~/Movies/Screen Recordings" : "Open ~/Pictures/Screenshots")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1673,7 +2432,7 @@ private struct SnippingEditorView: View {
         let toViewX = canvasSize.width / pxW
         let toViewY = canvasSize.height / pxH
 
-        return ZStack {
+        return ZStack(alignment: .topLeading) {
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)
@@ -1695,6 +2454,68 @@ private struct SnippingEditorView: View {
             }
             .frame(width: canvasSize.width, height: canvasSize.height)
             .allowsHitTesting(false)
+
+            if let originPx = editorState.activeTextDraftOriginPx {
+                let rawX = originPx.x * toViewX
+                let rawY = originPx.y * toViewY
+                let maxBoxW = max(160, min(320, canvasSize.width - 12))
+                let clampedX = max(4, min(canvasSize.width - maxBoxW, rawX))
+                let clampedY = max(4, min(max(4, canvasSize.height - 44), rawY))
+
+                HStack(spacing: 6) {
+                    SnipInlineTextField(
+                        text: $editorState.activeTextDraft,
+                        fontSize: editorState.textFontSize,
+                        color: editorState.selectedPenColor,
+                        onCommit: {
+                            if editorState.commitTextDraft() {
+                                onCommitTextAnnotation()
+                            }
+                        },
+                        onCancel: {
+                            editorState.cancelTextDraft()
+                        }
+                    )
+                    .frame(minWidth: 120, maxWidth: maxBoxW - 62, minHeight: max(28, editorState.textFontSize * 1.45))
+
+                    Button {
+                        if editorState.commitTextDraft() {
+                            onCommitTextAnnotation()
+                        }
+                    } label: {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.accentColor))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Commit text (Enter)")
+
+                    Button {
+                        editorState.cancelTextDraft()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.white.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel text (Esc)")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color(red: 0.08, green: 0.09, blue: 0.11).opacity(0.84))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(Color.cyan.opacity(0.85), lineWidth: 1.25)
+                        )
+                )
+                .offset(x: clampedX, y: clampedY)
+            }
         }
         .frame(width: canvasSize.width, height: canvasSize.height)
         .contentShape(Rectangle())
@@ -1764,6 +2585,8 @@ private struct SnippingEditorView: View {
                 color: editorState.selectedPenColor,
                 lineWidth: editorState.penWidth * scaleX
             )
+        case .text:
+            break
         case .eraser:
             editorState.history.erase(near: ptPx, tolerance: 14 * scaleX)
         case .crop:
@@ -1781,6 +2604,21 @@ private struct SnippingEditorView: View {
     }
 
     private func handleCanvasDragEnded(value: DragGesture.Value, canvasSize: CGSize) {
+        if editorState.activeTool == .text {
+            let clampedX = max(4, min(max(4, canvasSize.width - 24), value.location.x))
+            let clampedY = max(4, min(max(4, canvasSize.height - 24), value.location.y))
+            let scaleX = editorState.imagePixelSize.width / max(1, canvasSize.width)
+            let scaleY = editorState.imagePixelSize.height / max(1, canvasSize.height)
+            let ptPx = CGPoint(x: clampedX * scaleX, y: clampedY * scaleY)
+
+            if editorState.commitTextDraft() {
+                onCommitTextAnnotation()
+            }
+            editorState.activeTextDraftCanvasScale = scaleX
+            editorState.activeTextDraftOriginPx = ptPx
+            editorState.activeTextDraft = ""
+            return
+        }
         if let pending = editorState.inProgressAnnotation {
             editorState.history.append(pending)
             editorState.inProgressAnnotation = nil
@@ -1842,6 +2680,15 @@ private struct SnippingEditorView: View {
                 height: rect.height * toViewY
             )
             ctx.stroke(Path(vr), with: .color(color), style: style)
+
+        case .text(let origin, let text, let fontSize):
+            let displaySize = max(8, fontSize * scaleFromPixels)
+            let resolved = ctx.resolve(
+                Text(text)
+                    .font(.system(size: displaySize, weight: .semibold))
+                    .foregroundStyle(color)
+            )
+            ctx.draw(resolved, at: CGPoint(x: origin.x * toViewX, y: origin.y * toViewY), anchor: .topLeading)
         }
     }
 
@@ -1975,5 +2822,121 @@ private final class SnipDragHandleNSView: NSView {
         } else {
             window?.performDrag(with: event)
         }
+    }
+}
+
+private struct SnipInlineTextField: NSViewRepresentable {
+    @Binding var text: String
+    let fontSize: CGFloat
+    let color: SnipColorRGB
+    let onCommit: () -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let tf = NSTextField()
+        tf.delegate = context.coordinator
+        tf.isBordered = false
+        tf.drawsBackground = false
+        tf.focusRingType = .none
+        tf.placeholderString = "Type text..."
+        tf.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        tf.textColor = NSColor(srgbRed: color.r, green: color.g, blue: color.b, alpha: color.a)
+        tf.stringValue = text
+        tf.lineBreakMode = .byWordWrapping
+        tf.cell?.wraps = true
+        tf.cell?.isScrollable = false
+        DispatchQueue.main.async { [weak tf] in
+            guard let tf, let win = tf.window else { return }
+            win.makeFirstResponder(tf)
+        }
+        return tf
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        nsView.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        nsView.textColor = NSColor(srgbRed: color.r, green: color.g, blue: color.b, alpha: color.a)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: SnipInlineTextField
+
+        init(_ parent: SnipInlineTextField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let tf = obj.object as? NSTextField else { return }
+            parent.text = tf.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let flags = NSApp.currentEvent?.modifierFlags ?? []
+                if flags.contains(.shift) || flags.contains(.option) {
+                    textView.insertNewlineIgnoringFieldEditor(nil)
+                    return true
+                }
+                parent.onCommit()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onCancel()
+                return true
+            }
+            return false
+        }
+    }
+}
+
+private struct SnipVideoPlayerView: NSViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.showsFullScreenToggleButton = false
+        let player = AVPlayer(url: url)
+        context.coordinator.player = player
+        context.coordinator.loadedURL = url
+        view.player = player
+        player.play()
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if context.coordinator.loadedURL != url {
+            context.coordinator.player?.pause()
+            let player = AVPlayer(url: url)
+            context.coordinator.player = player
+            context.coordinator.loadedURL = url
+            nsView.player = player
+            player.play()
+        }
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
+        coordinator.player?.pause()
+        nsView.player = nil
+        coordinator.player = nil
+        coordinator.loadedURL = nil
+    }
+
+    @MainActor
+    final class Coordinator {
+        var player: AVPlayer?
+        var loadedURL: URL?
     }
 }

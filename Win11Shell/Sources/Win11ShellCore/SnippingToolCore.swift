@@ -1,11 +1,39 @@
 import CoreGraphics
 import Foundation
 
+public enum SnipOutputKind: String, CaseIterable, Equatable, Sendable {
+    case photo
+    case video
+
+    public var displayTitle: String {
+        switch self {
+        case .photo: "Snip"
+        case .video: "Record"
+        }
+    }
+
+    public var systemSymbolName: String {
+        switch self {
+        case .photo: "camera"
+        case .video: "video"
+        }
+    }
+}
+
 public enum SnipCaptureMode: String, CaseIterable, Equatable, Sendable {
     case rectangle
     case window
     case fullscreen
     case freeform
+
+    public static func supportedModes(for outputKind: SnipOutputKind) -> [SnipCaptureMode] {
+        switch outputKind {
+        case .photo:
+            return [.rectangle, .window, .fullscreen, .freeform]
+        case .video:
+            return [.rectangle, .window, .fullscreen]
+        }
+    }
 
     public var displayTitle: String {
         switch self {
@@ -53,6 +81,7 @@ public enum SnipToolKind: String, CaseIterable, Equatable, Sendable {
     case highlighter
     case arrow
     case rectangle
+    case text
     case eraser
     case crop
 
@@ -62,6 +91,7 @@ public enum SnipToolKind: String, CaseIterable, Equatable, Sendable {
         case .highlighter: "Highlighter"
         case .arrow: "Arrow"
         case .rectangle: "Shape"
+        case .text: "Text"
         case .eraser: "Eraser"
         case .crop: "Crop"
         }
@@ -73,6 +103,7 @@ public enum SnipToolKind: String, CaseIterable, Equatable, Sendable {
         case .highlighter: "highlighter"
         case .arrow: "arrow.up.right"
         case .rectangle: "rectangle"
+        case .text: "textformat"
         case .eraser: "eraser"
         case .crop: "crop"
         }
@@ -113,6 +144,7 @@ public enum SnipAnnotationKind: Equatable, Sendable {
     case highlighter(points: [CGPoint])
     case arrow(start: CGPoint, end: CGPoint)
     case rectangle(rect: CGRect)
+    case text(origin: CGPoint, text: String, fontSize: CGFloat)
 }
 
 public struct SnipAnnotation: Identifiable, Equatable, Sendable {
@@ -321,7 +353,24 @@ public enum SnippingGeometry {
                 || distanceFromPointToSegment(point: point, a: tr, b: br) <= threshold
                 || distanceFromPointToSegment(point: point, a: br, b: bl) <= threshold
                 || distanceFromPointToSegment(point: point, a: bl, b: tl) <= threshold
+
+        case .text(let origin, let text, let fontSize):
+            let box = estimatedTextBoundingRect(origin: origin, text: text, fontSize: fontSize)
+            return box.insetBy(dx: -tolerance, dy: -tolerance).contains(point)
         }
+    }
+
+    public static func estimatedTextBoundingRect(
+        origin: CGPoint,
+        text: String,
+        fontSize: CGFloat
+    ) -> CGRect {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lineCount = max(1, lines.count)
+        let maxChars = max(1, lines.map(\.count).max() ?? 1)
+        let width = max(fontSize * 1.2, CGFloat(maxChars) * fontSize * 0.62)
+        let height = CGFloat(lineCount) * fontSize * 1.28
+        return CGRect(x: origin.x, y: origin.y, width: width, height: height)
     }
 
     public static func defaultScreenshotFilename(
@@ -339,5 +388,39 @@ public enum SnippingGeometry {
         homeDirectory
             .appendingPathComponent("Pictures", isDirectory: true)
             .appendingPathComponent("Screenshots", isDirectory: true)
+    }
+
+    public static func defaultRecordingFilename(
+        date: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = timeZone
+        fmt.dateFormat = "yyyy-MM-dd HHmmss"
+        return "Recording \(fmt.string(from: date)).mp4"
+    }
+
+    public static func defaultRecordingsDirectory(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent("Movies", isDirectory: true)
+            .appendingPathComponent("Screen Recordings", isDirectory: true)
+    }
+
+    public static func formatRecordingDuration(_ seconds: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(seconds.rounded(.down)))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let secs = totalSeconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%02d:%02d", minutes, secs)
+    }
+
+    public static func evenPixelDimension(_ value: CGFloat, minimum: Int = 16) -> Int {
+        let roundedEven = (Int(value.rounded()) / 2) * 2
+        let minEven = (max(2, minimum) % 2 == 0) ? max(2, minimum) : max(2, minimum) + 1
+        return max(minEven, roundedEven)
     }
 }
