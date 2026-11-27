@@ -6,10 +6,8 @@ import Win11ShellCore
 @MainActor
 public final class CustomKeyboardEngine {
     nonisolated public static let syntheticEventTag: Int64 = 0x57313153
-    private static let soloWinThresholdSeconds: TimeInterval = 0.280
-    private static let leftCommandKeyCode: Int64 = 55
     private static let escapeKeyCode: Int64 = 53
-    private static let relevantMask: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand, .maskShift]
+    private static let relevantMask: CGEventFlags = SoloWinTapDetector.relevantMask
 
     private enum TapEventKind: Sendable {
         case flagsChanged
@@ -29,8 +27,7 @@ public final class CustomKeyboardEngine {
     private var runLoopSource: CFRunLoopSource?
 
     // Solo Win tap state (mutated only on MainActor / main run loop)
-    private var winPressTime: TimeInterval?
-    private var winSoloEligible = false
+    private var soloWinDetector = SoloWinTapDetector()
 
     // Alt+Tab session state
     private var isAltTabActive = false
@@ -52,6 +49,9 @@ public final class CustomKeyboardEngine {
             (1 << CGEventType.keyDown.rawValue)
                 | (1 << CGEventType.keyUp.rawValue)
                 | (1 << CGEventType.flagsChanged.rawValue)
+                | (1 << CGEventType.leftMouseDown.rawValue)
+                | (1 << CGEventType.rightMouseDown.rawValue)
+                | (1 << CGEventType.otherMouseDown.rawValue)
         )
         let refcon = Unmanaged.passUnretained(self).toOpaque()
 
@@ -90,8 +90,7 @@ public final class CustomKeyboardEngine {
         eventTap = nil
         runLoopSource = nil
         actionHandler = nil
-        winPressTime = nil
-        winSoloEligible = false
+        soloWinDetector.reset()
         isAltTabActive = false
         remappedKeyDowns.removeAll()
         suppressedKeyDowns.removeAll()
@@ -108,6 +107,19 @@ public final class CustomKeyboardEngine {
         }
 
         if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventTag {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    soloWinDetector.cancel()
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.soloWinDetector.cancel()
+                }
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -156,8 +168,7 @@ public final class CustomKeyboardEngine {
             return .passthrough
 
         case .keyDown:
-            winSoloEligible = false
-            winPressTime = nil
+            soloWinDetector.cancel()
 
             let active = flags.intersection(Self.relevantMask)
             if isAltTabActive,
@@ -220,32 +231,8 @@ public final class CustomKeyboardEngine {
             dispatchAction(.altTabCommit)
         }
 
-        if keyCode == Self.leftCommandKeyCode {
-            if active.contains(.maskCommand) {
-                if active == .maskCommand {
-                    winPressTime = ProcessInfo.processInfo.systemUptime
-                    winSoloEligible = true
-                } else {
-                    winPressTime = nil
-                    winSoloEligible = false
-                }
-            } else {
-                if winSoloEligible,
-                   let pressedAt = winPressTime,
-                   (ProcessInfo.processInfo.systemUptime - pressedAt) <= Self.soloWinThresholdSeconds,
-                   active.isEmpty {
-                    winPressTime = nil
-                    winSoloEligible = false
-                    dispatchAction(.toggleStartMenu)
-                    return
-                }
-                winPressTime = nil
-                winSoloEligible = false
-            }
-        } else {
-            // Any other modifier transition invalidates solo Win tap.
-            winPressTime = nil
-            winSoloEligible = false
+        if soloWinDetector.handleFlagsChanged(keyCode: keyCode, flagsRaw: flags.rawValue) {
+            dispatchAction(.toggleStartMenu)
         }
     }
 

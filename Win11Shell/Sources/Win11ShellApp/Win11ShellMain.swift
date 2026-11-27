@@ -379,7 +379,7 @@ final class ShellCoordinator {
             quickSettings.dismiss()
             calendarFlyout.dismiss()
             auxFlyouts.dismiss()
-            startMenu.toggle(focusSearch: false)
+            startMenu.toggle(focusSearch: true)
         case .openStartSearch:
             quickSettings.dismiss()
             calendarFlyout.dismiss()
