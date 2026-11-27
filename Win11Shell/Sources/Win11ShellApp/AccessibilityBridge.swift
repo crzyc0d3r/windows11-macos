@@ -183,12 +183,14 @@ public enum AccessibilityBridge {
         }
     }
 
-    public static func setPosition(_ element: AXUIElement, origin: CGPoint) {
-        AXUIElementSetMessagingTimeout(element, 0.25)
+    @discardableResult
+    public static func setPosition(_ element: AXUIElement, origin: CGPoint, timeout: Float = 0.25) -> Bool {
+        AXUIElementSetMessagingTimeout(element, timeout)
         var pos = origin
-        if let posVal = AXValueCreate(.cgPoint, &pos) {
-            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
+        guard let posVal = AXValueCreate(.cgPoint, &pos) else {
+            return false
         }
+        return AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal) == .success
     }
 
     @discardableResult
@@ -405,6 +407,71 @@ public enum AccessibilityBridge {
             return nil
         }
         return CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
+    }
+
+    public enum TitlebarHitResult: Equatable, Sendable {
+        case trafficLight
+        case interactiveControl
+        case nativeTitlebarDragSurface
+        case unknown
+    }
+
+    private static let titlebarAncestorStopRoles: Set<String> = [
+        "AXWindow",
+        "AXToolbar",
+        "AXWebArea",
+        "AXApplication",
+        "AXScrollArea",
+        "AXTabGroup"
+    ]
+
+    /// Fast AX hit-test used by `CGEventTap` to distinguish interactive titlebar controls
+    /// from native traffic lights and empty OS titlebar drag regions.
+    public static func classifyTitlebarHit(atAXPoint axPoint: CGPoint, pid: pid_t) -> TitlebarHitResult {
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.04)
+
+        var hitElement: AXUIElement?
+        let err = AXUIElementCopyElementAtPosition(appEl, Float(axPoint.x), Float(axPoint.y), &hitElement)
+        guard err == .success, let startEl = hitElement else {
+            return .unknown
+        }
+
+        var current: AXUIElement? = startEl
+        for _ in 0..<4 {
+            guard let el = current else { break }
+            AXUIElementSetMessagingTimeout(el, 0.03)
+            let role = stringAttribute(el, kAXRoleAttribute)
+            if role == (kAXMenuBarRole as String) {
+                return .unknown
+            }
+            let subrole = stringAttribute(el, kAXSubroleAttribute)
+            var actionsRef: CFArray?
+            AXUIElementCopyActionNames(el, &actionsRef)
+            let actions = (actionsRef as? [String]) ?? []
+
+            switch WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: subrole, actions: actions) {
+            case .trafficLight:
+                return .trafficLight
+            case .interactiveControl:
+                return .interactiveControl
+            case .dragSurface:
+                if let role, titlebarAncestorStopRoles.contains(role) {
+                    return .nativeTitlebarDragSurface
+                }
+            }
+
+            var parentRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parentRef) == .success,
+               let parentRef,
+               CFGetTypeID(parentRef) == AXUIElementGetTypeID() {
+                current = (parentRef as! AXUIElement)
+            } else {
+                current = nil
+            }
+        }
+
+        return .nativeTitlebarDragSurface
     }
 
     // MARK: - Traffic Light Inspection & Titlebar Color Sampling

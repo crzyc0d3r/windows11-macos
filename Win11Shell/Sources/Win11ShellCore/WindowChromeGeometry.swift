@@ -214,4 +214,98 @@ public enum WindowChromeGeometry {
         }
         return nil
     }
+
+    public enum TitlebarElementKind: Equatable, Sendable {
+        case trafficLight
+        case interactiveControl
+        case dragSurface
+    }
+
+    private static let trafficLightSubroles: Set<String> = [
+        "AXCloseButton",
+        "AXMinimizeButton",
+        "AXZoomButton",
+        "AXFullScreenButton"
+    ]
+
+    private static let interactiveTitlebarRoles: Set<String> = [
+        "AXButton",
+        "AXRadioButton",
+        "AXCheckBox",
+        "AXPopUpButton",
+        "AXMenuButton",
+        "AXTextField",
+        "AXSearchField",
+        "AXComboBox",
+        "AXTab",
+        "AXLink",
+        "AXDisclosureTriangle",
+        "AXMenuItem",
+        "AXMenuBarItem",
+        "AXSegmentedControl",
+        "AXSlider",
+        "AXIncrementor",
+        "AXColorWell"
+    ]
+
+    private static let nonInteractiveTitlebarContainerRoles: Set<String> = [
+        "AXWindow",
+        "AXWebArea",
+        "AXApplication",
+        "AXScrollArea",
+        "AXToolbar",
+        "AXSplitGroup",
+        "AXTabGroup",
+        "AXMenuBar"
+    ]
+
+    /// Estimates the height of a window's native macOS titlebar strip from its traffic-light button rect.
+    public static func estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect?) -> CGFloat {
+        if let rel = trafficLightRelativeRect, rel.maxY > 0 {
+            return max(36, min(52, rel.maxY + 10))
+        }
+        return 38
+    }
+
+    /// Returns `true` when `axPoint` lies inside the window's native top titlebar band,
+    /// preserving the outer `resizeBorder` (top/left/right) for window resizing.
+    public static func isInNativeTitlebarBand(
+        axPoint: CGPoint,
+        windowAXFrame: CGRect,
+        titlebarHeight: CGFloat = 38,
+        resizeBorder: CGFloat = 5
+    ) -> Bool {
+        guard windowAXFrame.width >= 100, windowAXFrame.height >= 60 else {
+            return false
+        }
+        let localX = axPoint.x - windowAXFrame.minX
+        let localY = axPoint.y - windowAXFrame.minY
+        return localX >= resizeBorder
+            && localX <= (windowAXFrame.width - resizeBorder)
+            && localY >= resizeBorder
+            && localY <= min(titlebarHeight, windowAXFrame.height)
+    }
+
+    /// Classifies an Accessibility element inside a window's native titlebar band into
+    /// traffic lights, interactive controls (tabs/buttons/inputs), or bare draggable titlebar surface.
+    public static func classifyTitlebarElement(
+        role: String?,
+        subrole: String?,
+        actions: [String]
+    ) -> TitlebarElementKind {
+        if let subrole, trafficLightSubroles.contains(subrole) {
+            return .trafficLight
+        }
+        if let role, interactiveTitlebarRoles.contains(role) {
+            return .interactiveControl
+        }
+        let hasPressAction = actions.contains("AXPress") || actions.contains("AXConfirm")
+        if hasPressAction {
+            if let role, nonInteractiveTitlebarContainerRoles.contains(role) {
+                return .dragSurface
+            }
+            return .interactiveControl
+        }
+        return .dragSurface
+    }
 }
