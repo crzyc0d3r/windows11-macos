@@ -55,7 +55,7 @@ public final class WindowSnapManager {
             }
             onWindowFrameChanged?()
         } else {
-            if savedRestoreFrames[key] == nil {
+            if savedRestoreFrames[key] == nil && shouldSaveRestoreFrame(win, on: screen) {
                 savedRestoreFrames[key] = win.axFrame
             }
             applySnapZone(.maximized, to: win, bundleID: bid)
@@ -98,7 +98,7 @@ public final class WindowSnapManager {
         }
         let (win, bid, screen) = target
         let key = windowKey(win, bundleID: bid)
-        if savedRestoreFrames[key] == nil {
+        if savedRestoreFrames[key] == nil && shouldSaveRestoreFrame(win, on: screen) {
             savedRestoreFrames[key] = win.axFrame
         }
 
@@ -123,7 +123,22 @@ public final class WindowSnapManager {
             barHeight: CGFloat(model.config.windowBarHeight),
             taskbarHeight: CGFloat(model.config.taskbarHeight)
         )
-        return abs(win.axFrame.width - maxAX.width) < 12 && abs(win.axFrame.height - maxAX.height) < 12
+        return abs(win.axFrame.width - maxAX.width) < 24
+            && abs(win.axFrame.height - maxAX.height) < 24
+            && abs(win.axFrame.minY - maxAX.minY) < 12
+    }
+
+    private func shouldSaveRestoreFrame(_ win: AXWindowInfo, on screen: NSScreen) -> Bool {
+        let maxAX = WindowChromeGeometry.maximizedAXFrame(
+            forScreenFrameCocoa: screen.frame,
+            visibleFrameCocoa: screen.visibleFrame,
+            primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
+            barHeight: CGFloat(model.config.windowBarHeight),
+            taskbarHeight: CGFloat(model.config.taskbarHeight)
+        )
+        let coversWidth = win.axFrame.width >= screen.frame.width - 20
+        let coversHeight = win.axFrame.height >= maxAX.height - 20
+        return !(coversWidth && coversHeight)
     }
 
     public func restoreFrameForDrag(window: AXWindowInfo, bundleID: String, cursorAX: CGPoint) -> CGRect? {

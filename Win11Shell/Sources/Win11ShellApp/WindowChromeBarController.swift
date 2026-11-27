@@ -214,9 +214,14 @@ public final class WindowChromeBarController: NSObject {
         var effectiveWin = win
         var effectiveScreen = screen
         if !isDraggingTargetWindow && !isExternalMouseDragging && NSEvent.pressedMouseButtons == 0 {
-            let screenTopAX = primaryH - min(screen.visibleFrame.maxY, screen.frame.maxY)
-            let minSafeTopAX = screenTopAX + CGFloat(model.config.windowBarHeight)
-            if win.axFrame.minY < minSafeTopAX - 1.0 {
+            if WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+                axFrame: win.axFrame,
+                screenFrameCocoa: screen.frame,
+                visibleFrameCocoa: screen.visibleFrame,
+                primaryScreenHeight: primaryH,
+                barHeight: CGFloat(model.config.windowBarHeight),
+                taskbarHeight: CGFloat(model.config.taskbarHeight)
+            ) {
                 if lastAutoNormalizedFrameByWindowID[win.windowID] != win.axFrame,
                    let normalized = WindowChromeGeometry.normalizedAXFrame(
                     forAXWindowFrame: win.axFrame,

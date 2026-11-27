@@ -175,10 +175,20 @@ public enum AccessibilityBridge {
         AXUIElementSetMessagingTimeout(element, 0.25)
         var pos = axFrame.origin
         var size = axFrame.size
-        if let posVal = AXValueCreate(.cgPoint, &pos) {
+        let posVal = AXValueCreate(.cgPoint, &pos)
+        let sizeVal = AXValueCreate(.cgSize, &size)
+        // Position -> Size -> Position -> Size prevents AppKit/Electron edge-clamping
+        // both when shrinking+moving down (e.g. from native Zoom) and when growing+moving up/left.
+        if let posVal {
             AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
         }
-        if let sizeVal = AXValueCreate(.cgSize, &size) {
+        if let sizeVal {
+            AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeVal)
+        }
+        if let posVal {
+            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
+        }
+        if let sizeVal {
             AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeVal)
         }
     }

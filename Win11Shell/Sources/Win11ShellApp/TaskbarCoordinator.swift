@@ -14,6 +14,7 @@ public final class TaskbarCoordinator {
     private let showDesktop: ShowDesktopController
 
     private var panels: [CGDirectDisplayID: NonActivatingFloatingPanel] = [:]
+    private var notchBezelPanels: [CGDirectDisplayID: NonActivatingFloatingPanel] = [:]
     private var autoHideTimer: Timer?
     private var isAutoHidden = false
 
@@ -59,11 +60,36 @@ public final class TaskbarCoordinator {
         }
         panels.removeAll()
 
+        for (_, bezel) in notchBezelPanels {
+            bezel.orderOut(nil)
+        }
+        notchBezelPanels.removeAll()
+
         let height = CGFloat(model.config.taskbarHeight)
         for screen in NSScreen.screens {
             guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
                 continue
             }
+            if let bezelFrame = WindowChromeGeometry.notchBezelFrameCocoa(
+                screenFrameCocoa: screen.frame,
+                safeAreaTopInset: screen.safeAreaInsets.top
+            ) {
+                let bezel = NonActivatingFloatingPanel(
+                    contentRect: bezelFrame,
+                    styleMask: [.borderless, .nonactivatingPanel],
+                    backing: .buffered,
+                    defer: false
+                )
+                bezel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+                bezel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+                bezel.backgroundColor = .black
+                bezel.isOpaque = true
+                bezel.hasShadow = false
+                bezel.ignoresMouseEvents = true
+                bezel.orderFrontRegardless()
+                notchBezelPanels[displayID] = bezel
+            }
+
             let frame = NSRect(x: screen.frame.minX, y: screen.frame.minY, width: screen.frame.width, height: height)
             let p = NonActivatingFloatingPanel(
                 contentRect: frame,
@@ -161,7 +187,21 @@ public final class TaskbarCoordinator {
             // Hide when frontmost window on this screen is in native macOS fullscreen
             if frontIsFullScreen && frontScreen == screen {
                 panel.orderOut(nil)
+                notchBezelPanels[displayID]?.orderOut(nil)
                 continue
+            }
+
+            if let bezel = notchBezelPanels[displayID],
+               let bezelFrame = WindowChromeGeometry.notchBezelFrameCocoa(
+                screenFrameCocoa: screen.frame,
+                safeAreaTopInset: screen.safeAreaInsets.top
+               ) {
+                if bezel.frame != bezelFrame {
+                    bezel.setFrame(bezelFrame, display: true)
+                }
+                if !bezel.isVisible {
+                    bezel.orderFrontRegardless()
+                }
             }
 
             if model.config.taskbarAutoHide {

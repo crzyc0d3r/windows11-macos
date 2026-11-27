@@ -299,4 +299,64 @@ struct Win11ShellCoreTests {
                 == .dragSurface
         )
     }
+
+    @Test("Notch bezel frame covers top safe area band on notched displays and returns nil otherwise")
+    func notchBezelFrameGeometry() {
+        let notchedScreen = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+        let bezel = WindowChromeGeometry.notchBezelFrameCocoa(
+            screenFrameCocoa: notchedScreen,
+            safeAreaTopInset: 38
+        )
+        #expect(bezel == CGRect(x: 0, y: 1131, width: 1800, height: 38))
+
+        let standardScreen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        #expect(WindowChromeGeometry.notchBezelFrameCocoa(screenFrameCocoa: standardScreen, safeAreaTopInset: 0) == nil)
+    }
+
+    @Test("Auto-normalization catches native zoom and bottom-clipped maximized windows while leaving floating windows")
+    func autoNormalizationFocusedCheck() {
+        let primaryH: CGFloat = 1169
+        let screen = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+        let visible = CGRect(x: 0, y: 0, width: 1800, height: 1131)
+
+        // Native macOS Zoom (0, 38, 1800, 1131) extends into top chrome bar and bottom taskbar
+        #expect(WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: CGRect(x: 0, y: 38, width: 1800, height: 1131),
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48
+        ))
+
+        // Bottom-clipped maximized window (0, 66, 1800, 1103) extends behind taskbar
+        #expect(WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: CGRect(x: 0, y: 66, width: 1800, height: 1103),
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48
+        ))
+
+        // Clean Win11 maximized window (0, 66, 1800, 1055) does not trigger normalization
+        #expect(!WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: CGRect(x: 0, y: 66, width: 1800, height: 1055),
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48
+        ))
+
+        // Small floating window positioned partially near bottom taskbar stays untouched
+        #expect(!WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: CGRect(x: 200, y: 650, width: 700, height: 500),
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48
+        ))
+    }
 }

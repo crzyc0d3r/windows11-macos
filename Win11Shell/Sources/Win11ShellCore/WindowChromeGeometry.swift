@@ -308,4 +308,58 @@ public enum WindowChromeGeometry {
         }
         return .dragSurface
     }
+
+    /// Returns the Cocoa screen rect for the top notch-bezel band when `safeAreaTopInset > 1` (e.g. 38pt on notched MacBook Pro displays).
+    public static func notchBezelFrameCocoa(
+        screenFrameCocoa: CGRect,
+        safeAreaTopInset: CGFloat
+    ) -> CGRect? {
+        guard safeAreaTopInset > 1,
+              screenFrameCocoa.width > 0,
+              screenFrameCocoa.height > safeAreaTopInset
+        else {
+            return nil
+        }
+        return CGRect(
+            x: screenFrameCocoa.minX,
+            y: screenFrameCocoa.maxY - safeAreaTopInset,
+            width: screenFrameCocoa.width,
+            height: safeAreaTopInset
+        )
+    }
+
+    /// Returns `true` when a focused window intrudes into the 28pt chrome bar or is a maximized/tall window
+    /// clipped behind the 48pt bottom taskbar, while leaving intentionally positioned smaller floating windows untouched.
+    public static func shouldAutoNormalizeFocusedWindow(
+        axFrame: CGRect,
+        screenFrameCocoa: CGRect,
+        visibleFrameCocoa: CGRect,
+        primaryScreenHeight: CGFloat,
+        barHeight: CGFloat,
+        taskbarHeight: CGFloat
+    ) -> Bool {
+        guard normalizedAXFrame(
+            forAXWindowFrame: axFrame,
+            screenFrameCocoa: screenFrameCocoa,
+            visibleFrameCocoa: visibleFrameCocoa,
+            primaryScreenHeight: primaryScreenHeight,
+            barHeight: barHeight,
+            taskbarHeight: taskbarHeight
+        ) != nil else {
+            return false
+        }
+
+        let cocoa = axRectToCocoa(axFrame, primaryScreenHeight: primaryScreenHeight)
+        let workMinY = screenFrameCocoa.minY + taskbarHeight
+        let workMaxY = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY) - barHeight
+        let workHeight = max(120, workMaxY - workMinY)
+
+        if cocoa.maxY > workMaxY + 1.0 {
+            return true
+        }
+        if cocoa.minY < workMinY - 1.0 && (cocoa.maxY >= workMaxY - 40 || cocoa.height >= workHeight - 12) {
+            return true
+        }
+        return false
+    }
 }
