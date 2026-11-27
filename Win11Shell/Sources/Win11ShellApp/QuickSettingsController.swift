@@ -7,6 +7,7 @@ import Win11ShellCore
 public final class QuickSettingsController {
     private let model: RunningAppsModel
     private let system: SystemControlsBridge
+    public var onLaunchSnippingTool: (@MainActor () -> Void)?
     private var panel: FocusableFloatingPanel?
     private var outsideMonitor: Any?
 
@@ -30,6 +31,10 @@ public final class QuickSettingsController {
         let hosting = NSHostingView(rootView: QuickSettingsView(
             model: model,
             system: system,
+            onSnip: { [weak self] in
+                self?.dismiss()
+                self?.onLaunchSnippingTool?()
+            },
             onDismiss: { [weak self] in self?.dismiss() }
         ))
         let fitting = hosting.fittingSize
@@ -88,6 +93,7 @@ public final class QuickSettingsController {
 private struct QuickSettingsView: View {
     @Bindable var model: RunningAppsModel
     @Bindable var system: SystemControlsBridge
+    let onSnip: () -> Void
     let onDismiss: () -> Void
 
     private var needsCorePermissions: Bool {
@@ -178,6 +184,12 @@ private struct QuickSettingsView: View {
                     symbol: "macwindow",
                     isOn: model.config.showWindowChromeBar,
                     action: { model.config.showWindowChromeBar.toggle() }
+                )
+                QuickTile(
+                    title: "Snipping Tool",
+                    symbol: "scissors",
+                    isOn: false,
+                    action: onSnip
                 )
             }
 
@@ -314,6 +326,7 @@ private struct QuickTile: View {
 public final class AuxiliaryFlyoutsController {
     private let model: RunningAppsModel
     private let system: SystemControlsBridge
+    public var onLaunchSnippingTool: (@MainActor () -> Void)?
     private var panel: FocusableFloatingPanel?
     private var outsideMonitor: Any?
 

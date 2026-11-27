@@ -208,6 +208,7 @@ final class ShellCoordinator {
     private let windowBar: WindowChromeBarController
     private let taskbar: TaskbarCoordinator
     private let altTabSwitcher: AltTabSwitcherController
+    private let snippingTool: SnippingToolController
     private let keyboardEngine: CustomKeyboardEngine
 
     private var didNormalizeWindows = false
@@ -242,6 +243,7 @@ final class ShellCoordinator {
             showDesktop: showDesktop
         )
         let altTabSwitcher = AltTabSwitcherController(model: model)
+        let snippingTool = SnippingToolController(model: model)
         let keyboardEngine = CustomKeyboardEngine(configProvider: { [weak model] in
             model?.config ?? .default
         })
@@ -259,7 +261,15 @@ final class ShellCoordinator {
         self.windowBar = windowBar
         self.taskbar = taskbar
         self.altTabSwitcher = altTabSwitcher
+        self.snippingTool = snippingTool
         self.keyboardEngine = keyboardEngine
+
+        model.onLaunchSnippingTool = { [weak snippingTool] in
+            snippingTool?.openEditorOrCapture()
+        }
+        quickSettings.onLaunchSnippingTool = { [weak snippingTool] in
+            snippingTool?.openEditorOrCapture()
+        }
 
         windowSnap.onWindowFrameChanged = { [weak windowBar] in
             windowBar?.syncActiveWindow()
@@ -325,6 +335,7 @@ final class ShellCoordinator {
     func cleanupBeforeTermination() {
         permissionTimer?.invalidate()
         permissionTimer = nil
+        snippingTool.cancelCapture()
         keyboardEngine.stop()
         windowBar.stopMouseDragTap()
         if didApplyHIDSwap {
@@ -406,10 +417,11 @@ final class ShellCoordinator {
         case .openTaskView:
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Mission Control.app"))
         case .snippingTool:
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            proc.arguments = ["-i", "-c"]
-            try? proc.run()
+            startMenu.dismiss()
+            quickSettings.dismiss()
+            calendarFlyout.dismiss()
+            auxFlyouts.dismiss()
+            snippingTool.beginCapture()
         case .openTaskManager:
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
         case .snapLeft:

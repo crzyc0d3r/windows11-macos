@@ -60,8 +60,13 @@ public struct Win11LogoGlyph: View {
 
 /// Custom NSPanel that allows text fields inside borderless panels (like Start Menu search) to become key window.
 public final class FocusableFloatingPanel: NSPanel {
+    public var allowsNotchAreaPlacement: Bool = false
     public override var canBecomeKey: Bool { true }
     public override var canBecomeMain: Bool { false }
+
+    public override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        allowsNotchAreaPlacement ? frameRect : super.constrainFrameRect(frameRect, to: screen)
+    }
 }
 
 /// Non-activating NSPanel used for the per-window menu bar, Taskbar, and hover previews
@@ -90,15 +95,51 @@ public enum AppIconCache {
             return hit
         }
 
-        let resolvedURL = url ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
         let img: NSImage
-        if let resolvedURL {
-            img = NSWorkspace.shared.icon(forFile: resolvedURL.path)
+        if bundleID == "com.hackedple.win11shell.snippingtool" {
+            img = renderVirtualToolIcon(symbol: "scissors", tint: NSColor.systemCyan, size: size)
         } else {
-            img = NSImage(systemSymbolName: "app.fill", accessibilityDescription: nil) ?? NSImage()
+            let resolvedURL = url ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+            if let resolvedURL {
+                img = NSWorkspace.shared.icon(forFile: resolvedURL.path)
+            } else {
+                img = NSImage(systemSymbolName: "app.fill", accessibilityDescription: nil) ?? NSImage()
+            }
         }
         img.size = NSSize(width: size, height: size)
         cache[key] = img
+        return img
+    }
+
+    private static func renderVirtualToolIcon(symbol: String, tint: NSColor, size: CGFloat) -> NSImage {
+        let px = max(16, Int((size * 2).rounded()))
+        let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            let bgPath = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: size * 0.22, yRadius: size * 0.22)
+            NSColor(srgbRed: 0.12, green: 0.16, blue: 0.24, alpha: 1.0).setFill()
+            bgPath.fill()
+            tint.withAlphaComponent(0.65).setStroke()
+            bgPath.lineWidth = max(1, size * 0.04)
+            bgPath.stroke()
+
+            if let sym = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size * 0.52, weight: .semibold)) {
+                let tinted = sym.copy() as? NSImage ?? sym
+                tinted.lockFocus()
+                tint.set()
+                NSRect(origin: .zero, size: tinted.size).fill(using: .sourceAtop)
+                tinted.unlockFocus()
+                let symSize = tinted.size
+                let dest = NSRect(
+                    x: (rect.width - symSize.width) / 2,
+                    y: (rect.height - symSize.height) / 2,
+                    width: symSize.width,
+                    height: symSize.height
+                )
+                tinted.draw(in: dest)
+            }
+            _ = px
+            return true
+        }
         return img
     }
 }

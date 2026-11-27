@@ -33,6 +33,7 @@ public final class RunningAppsModel {
     public var trayExtras: [TrayExtraItem] = []
     public var frontmostBundleID: String?
     public var frontmostPID: pid_t?
+    public var onLaunchSnippingTool: (@MainActor () -> Void)?
 
     private let configStore: Win11ConfigStore
     public var config: Win11Config {
@@ -87,7 +88,17 @@ public final class RunningAppsModel {
     }
 
     public func refreshInstalledApps() {
-        installedApps = AppCatalog.scanInstalledApps()
+        var apps = AppCatalog.scanInstalledApps()
+        let snipID = "com.hackedple.win11shell.snippingtool"
+        if !apps.contains(where: { $0.bundleID == snipID }) {
+            apps.append(InstalledAppEntry(
+                bundleID: snipID,
+                name: "Snipping Tool",
+                url: Bundle.main.bundleURL
+            ))
+            apps = AppCatalog.filterApps(apps, query: "", hideFinder: true)
+        }
+        installedApps = apps
     }
 
     public func refreshRecentFiles() {
@@ -208,6 +219,10 @@ public final class RunningAppsModel {
     }
 
     public func launchOrActivate(bundleID: String, forceNewWindow: Bool = false) {
+        if bundleID == "com.hackedple.win11shell.snippingtool" {
+            onLaunchSnippingTool?()
+            return
+        }
         if bundleID == "com.apple.finder" {
             launchOrActivate(bundleID: config.fileExplorerBundleID, forceNewWindow: forceNewWindow)
             return
@@ -249,6 +264,10 @@ public final class RunningAppsModel {
     }
 
     public func launchApp(entry: InstalledAppEntry) {
+        if entry.bundleID == "com.hackedple.win11shell.snippingtool" {
+            onLaunchSnippingTool?()
+            return
+        }
         let openCfg = NSWorkspace.OpenConfiguration()
         openCfg.activates = true
         NSWorkspace.shared.openApplication(at: entry.url, configuration: openCfg)

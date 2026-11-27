@@ -734,6 +734,82 @@ public enum AccessibilityBridge {
         }
     }
 
+    public static func captureDisplaySnapshot(
+        displayID: CGDirectDisplayID,
+        excludingPID: pid_t? = nil,
+        excludingWindowIDs: Set<CGWindowID> = []
+    ) async -> CGImage? {
+        if ProcessInfo.processInfo.systemUptime >= screenCaptureCooldownUntil {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                if let scDisplay = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first {
+                    let excludedWindows = content.windows.filter { win in
+                        if let excludingPID, win.owningApplication?.processID == excludingPID {
+                            return true
+                        }
+                        if excludingWindowIDs.contains(win.windowID) {
+                            return true
+                        }
+                        return false
+                    }
+                    let filter = SCContentFilter(display: scDisplay, excludingWindows: excludedWindows)
+                    let matchingScreen = NSScreen.screens.first {
+                        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
+                    }
+                    let scale = min(2.0, matchingScreen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0)
+                    let config = SCStreamConfiguration()
+                    config.width = max(200, Int((CGFloat(scDisplay.width) * scale).rounded()))
+                    config.height = max(200, Int((CGFloat(scDisplay.height) * scale).rounded()))
+                    config.showsCursor = false
+                    config.scalesToFit = true
+                    config.captureResolution = .best
+
+                    let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                    if !screenCaptureLiveVerified {
+                        screenCaptureLiveVerified = true
+                        ShellLogger.log("ScreenCaptureKit live display snapshot verified (\(cgImage.width)x\(cgImage.height))")
+                    }
+                    didLogScreenCaptureError = false
+                    return cgImage
+                }
+            } catch {
+                screenCaptureCooldownUntil = ProcessInfo.processInfo.systemUptime + 4.0
+                if !didLogScreenCaptureError {
+                    didLogScreenCaptureError = true
+                    ShellLogger.log("ScreenCaptureKit display snapshot error: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        return await captureDisplayFallbackCGImage()
+    }
+
+    private static func captureDisplayFallbackCGImage() async -> CGImage? {
+        await Task.detached(priority: .userInitiated) {
+            let tmpURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("win11-snip-fallback-\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            proc.arguments = ["-x", "-t", "png", tmpURL.path]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                guard proc.terminationStatus == 0,
+                      let source = CGImageSourceCreateWithURL(tmpURL as CFURL, nil)
+                else {
+                    return nil
+                }
+                return CGImageSourceCreateImageAtIndex(source, 0, nil)
+            } catch {
+                return nil
+            }
+        }.value
+    }
+
     // MARK: - Attribute Helpers
 
     private static func childElements(of element: AXUIElement) -> [AXUIElement] {

@@ -26,7 +26,8 @@ let package = Package(
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreWLAN"),
                 .linkedFramework("IOKit"),
-                .linkedFramework("ScreenCaptureKit")
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("Vision")
             ]
         ),
         .testTarget(
