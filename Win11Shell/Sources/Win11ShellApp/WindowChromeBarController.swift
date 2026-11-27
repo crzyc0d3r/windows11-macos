@@ -23,6 +23,10 @@ public final class WindowChromeBarController: NSObject {
     private let state = WindowChromeBarState()
     private var panel: NonActivatingFloatingPanel?
     private var snapPanel: NonActivatingFloatingPanel?
+    private var trafficLightMaskPanel: NonActivatingFloatingPanel?
+    private var trafficLightMaskView: TrafficLightMaskNSView?
+    private var sampledMaskColors: [String: NSColor] = [:]
+    private var pendingMaskColorKeys: Set<String> = []
     private var syncTimer: Timer?
     private var axObserver: AXObserver?
     private var observedPID: pid_t = 0
@@ -120,6 +124,8 @@ public final class WindowChromeBarController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self, pid != 0 else { return }
                 self.cachedMenusByPID.removeValue(forKey: pid)
+                let pidPrefix = "\(pid)-"
+                self.sampledMaskColors = self.sampledMaskColors.filter { !$0.key.hasPrefix(pidPrefix) }
                 if self.lastMenuPID == pid {
                     self.lastMenuPID = 0
                 }
@@ -224,12 +230,94 @@ public final class WindowChromeBarController: NSObject {
                 panel.orderFrontRegardless()
             }
         }
+
+        syncTrafficLightMask(for: win, bundleID: bundleID, primaryScreenHeight: primaryH)
     }
 
     private func hideBar() {
         currentWindow = nil
         panel?.orderOut(nil)
         snapPanel?.orderOut(nil)
+        trafficLightMaskPanel?.orderOut(nil)
+    }
+
+    private func syncTrafficLightMask(for win: AXWindowInfo, bundleID: String, primaryScreenHeight: CGFloat) {
+        guard bundleID != model.config.fileExplorerBundleID,
+              let axMaskRect = AccessibilityBridge.trafficLightUnionAXRect(for: win.element)
+        else {
+            trafficLightMaskPanel?.orderOut(nil)
+            return
+        }
+
+        let cocoaMaskRect = WindowChromeGeometry.axRectToCocoa(axMaskRect, primaryScreenHeight: primaryScreenHeight)
+        if trafficLightMaskPanel == nil {
+            let maskPanel = NonActivatingFloatingPanel(
+                contentRect: cocoaMaskRect,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            maskPanel.level = .floating
+            maskPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+            maskPanel.backgroundColor = .clear
+            maskPanel.isOpaque = false
+            maskPanel.hasShadow = false
+
+            let maskView = TrafficLightMaskNSView(frame: NSRect(origin: .zero, size: cocoaMaskRect.size))
+            maskView.onDragDelta = { [weak self] dx, dy in
+                self?.dragCurrentWindow(deltaX: dx, deltaY: dy)
+            }
+            maskView.onDragEnded = { [weak self] in
+                self?.finishDraggingCurrentWindow()
+            }
+            maskView.onDoubleClick = { [weak self] in
+                self?.toggleMaximizeCurrentWindow()
+            }
+            maskPanel.contentView = maskView
+            trafficLightMaskPanel = maskPanel
+            trafficLightMaskView = maskView
+        }
+
+        let colorKey = "\(win.pid)-\(win.windowID)"
+        let fallbackColor = defaultMaskFallbackColor()
+        trafficLightMaskView?.fillColor = sampledMaskColors[colorKey] ?? fallbackColor
+
+        if !pendingMaskColorKeys.contains(colorKey) && sampledMaskColors[colorKey] == nil {
+            pendingMaskColorKeys.insert(colorKey)
+            let windowID = win.windowID
+            let windowAXFrame = win.axFrame
+            Task { @MainActor [weak self] in
+                let sampled = await AccessibilityBridge.sampleTitlebarColor(
+                    windowID: windowID,
+                    windowAXFrame: windowAXFrame,
+                    buttonUnionAXRect: axMaskRect
+                )
+                guard let self else { return }
+                self.pendingMaskColorKeys.remove(colorKey)
+                if let sampled {
+                    self.sampledMaskColors[colorKey] = sampled
+                    if let cur = self.currentWindow, "\(cur.pid)-\(cur.windowID)" == colorKey {
+                        self.trafficLightMaskView?.fillColor = sampled
+                    }
+                }
+            }
+        }
+
+        if let maskPanel = trafficLightMaskPanel {
+            if maskPanel.frame != cocoaMaskRect {
+                maskPanel.setFrame(cocoaMaskRect, display: true)
+            }
+            if !maskPanel.isVisible {
+                maskPanel.orderFrontRegardless()
+            }
+        }
+    }
+
+    private func defaultMaskFallbackColor() -> NSColor {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0)
+            : NSColor(srgbRed: 0.925, green: 0.925, blue: 0.925, alpha: 1.0)
     }
 
     // MARK: - Window Actions (delegated to WindowSnapManager)
@@ -317,6 +405,9 @@ public final class WindowChromeBarController: NSObject {
         )
         currentWindow = updated
         panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x + deltaX, y: panel.frame.origin.y + deltaY))
+        if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible {
+            maskPanel.setFrameOrigin(NSPoint(x: maskPanel.frame.origin.x + deltaX, y: maskPanel.frame.origin.y + deltaY))
+        }
         snapManager.updateDragPreview(mouseLocationCocoa: NSEvent.mouseLocation)
     }
 
@@ -697,27 +788,87 @@ private final class TitleDragNSView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        return bounds.contains(local) ? self : nil
+    }
+
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
             onDoubleClick?()
             return
         }
-        lastScreenPoint = NSEvent.mouseLocation
+        var lastPoint = NSEvent.mouseLocation
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            switch next.type {
+            case .leftMouseDragged:
+                let current = NSEvent.mouseLocation
+                let dx = current.x - lastPoint.x
+                let dy = current.y - lastPoint.y
+                lastPoint = current
+                if abs(dx) > 0.1 || abs(dy) > 0.1 {
+                    onDragDelta?(dx, dy)
+                }
+            case .leftMouseUp:
+                onDragEnded?()
+                return
+            default:
+                break
+            }
+        }
+        onDragEnded?()
     }
+}
 
-    override func mouseDragged(with event: NSEvent) {
-        guard let last = lastScreenPoint else { return }
-        let current = NSEvent.mouseLocation
-        let dx = current.x - last.x
-        let dy = current.y - last.y
-        lastScreenPoint = current
-        if abs(dx) > 0.1 || abs(dy) > 0.1 {
-            onDragDelta?(dx, dy)
+private final class TrafficLightMaskNSView: NSView {
+    var fillColor: NSColor = NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0) {
+        didSet {
+            layer?.backgroundColor = fillColor.cgColor
         }
     }
+    var onDragDelta: ((CGFloat, CGFloat) -> Void)?
+    var onDragEnded: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
 
-    override func mouseUp(with event: NSEvent) {
-        lastScreenPoint = nil
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.masksToBounds = true
+        layer?.backgroundColor = fillColor.cgColor
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            onDoubleClick?()
+            return
+        }
+        var lastPoint = NSEvent.mouseLocation
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            switch next.type {
+            case .leftMouseDragged:
+                let current = NSEvent.mouseLocation
+                let dx = current.x - lastPoint.x
+                let dy = current.y - lastPoint.y
+                lastPoint = current
+                if abs(dx) > 0.1 || abs(dy) > 0.1 {
+                    onDragDelta?(dx, dy)
+                }
+            case .leftMouseUp:
+                onDragEnded?()
+                return
+            default:
+                break
+            }
+        }
         onDragEnded?()
     }
 }

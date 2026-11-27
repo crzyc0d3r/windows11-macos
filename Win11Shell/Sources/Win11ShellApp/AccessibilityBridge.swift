@@ -354,6 +354,123 @@ public enum AccessibilityBridge {
         return extras
     }
 
+    // MARK: - Traffic Light Inspection & Titlebar Color Sampling
+
+    public static func trafficLightUnionAXRect(for windowElement: AXUIElement) -> CGRect? {
+        AXUIElementSetMessagingTimeout(windowElement, 0.15)
+        let attrs = [
+            kAXCloseButtonAttribute as String,
+            kAXMinimizeButtonAttribute as String,
+            "AXFullScreenButton",
+            kAXZoomButtonAttribute as String
+        ]
+
+        var unionRect = CGRect.null
+        for attr in attrs {
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(windowElement, attr as CFString, &ref) == .success,
+                  let ref,
+                  CFGetTypeID(ref) == AXUIElementGetTypeID()
+            else {
+                continue
+            }
+            let btnEl = ref as! AXUIElement
+            AXUIElementSetMessagingTimeout(btnEl, 0.1)
+            if let r = rectAttribute(btnEl), r.width >= 6, r.height >= 6 {
+                unionRect = unionRect.isNull ? r : unionRect.union(r)
+            }
+        }
+
+        guard !unionRect.isNull,
+              unionRect.width >= 32,
+              unionRect.width <= 110,
+              unionRect.height >= 10,
+              unionRect.height <= 36
+        else {
+            return nil
+        }
+
+        return unionRect.insetBy(dx: -4, dy: -3)
+    }
+
+    public static func sampleTitlebarColor(
+        windowID: CGWindowID,
+        windowAXFrame: CGRect,
+        buttonUnionAXRect: CGRect
+    ) async -> NSColor? {
+        guard windowID != 0,
+              windowAXFrame.width > 40,
+              windowAXFrame.height > 40,
+              hasScreenRecordingPermission()
+        else {
+            return nil
+        }
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let scWindow = content.windows.first(where: { $0.windowID == windowID }) else {
+                return nil
+            }
+            let filter = SCContentFilter(desktopIndependentWindow: scWindow)
+            let config = SCStreamConfiguration()
+            config.width = max(120, Int(windowAXFrame.width.rounded()))
+            config.height = max(80, Int(windowAXFrame.height.rounded()))
+            config.showsCursor = false
+
+            let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            guard let provider = cgImage.dataProvider,
+                  let data = provider.data,
+                  let ptr = CFDataGetBytePtr(data)
+            else {
+                return nil
+            }
+
+            let imgW = cgImage.width
+            let imgH = cgImage.height
+            let scaleX = CGFloat(imgW) / windowAXFrame.width
+            let scaleY = CGFloat(imgH) / windowAXFrame.height
+
+            let buttonRightLocal = buttonUnionAXRect.maxX - windowAXFrame.minX
+            let buttonLeftLocal = buttonUnionAXRect.minX - windowAXFrame.minX
+            let buttonTopLocal = buttonUnionAXRect.minY - windowAXFrame.minY
+            let buttonMidYLocal = buttonUnionAXRect.midY - windowAXFrame.minY
+
+            let sampleXPt = min(windowAXFrame.width - 4, buttonRightLocal + 8)
+            let sampleYPt = max(2, min(windowAXFrame.height - 4, buttonMidYLocal))
+            let fallbackXPt = max(2, min(windowAXFrame.width - 4, buttonLeftLocal + 4))
+            let fallbackYPt = max(2, buttonTopLocal - 4)
+
+            let candidates = [
+                (Int((sampleXPt * scaleX).rounded()), Int((sampleYPt * scaleY).rounded())),
+                (Int((fallbackXPt * scaleX).rounded()), Int((fallbackYPt * scaleY).rounded()))
+            ]
+
+            let bytesPerPixel = max(4, cgImage.bitsPerPixel / 8)
+            let bytesPerRow = cgImage.bytesPerRow
+            let isLittleEndian = cgImage.bitmapInfo.contains(.byteOrder32Little)
+
+            for (rawX, rawY) in candidates {
+                let px = max(0, min(imgW - 1, rawX))
+                let py = max(0, min(imgH - 1, rawY))
+                let offset = py * bytesPerRow + px * bytesPerPixel
+                guard offset + 3 < CFDataGetLength(data) else { continue }
+
+                let b0 = CGFloat(ptr[offset]) / 255.0
+                let b1 = CGFloat(ptr[offset + 1]) / 255.0
+                let b2 = CGFloat(ptr[offset + 2]) / 255.0
+
+                if isLittleEndian {
+                    return NSColor(srgbRed: b2, green: b1, blue: b0, alpha: 1.0)
+                } else {
+                    return NSColor(srgbRed: b0, green: b1, blue: b2, alpha: 1.0)
+                }
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Live Window Thumbnail (ScreenCaptureKit)
 
     public static func captureWindowThumbnail(windowID: CGWindowID) async -> NSImage? {

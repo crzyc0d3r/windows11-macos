@@ -141,9 +141,18 @@ fi
 
 # Top Menu Bar
 case "$PREV_HI_HIDE_MENU_BAR" in
-    1|true|TRUE|YES|yes) run_as_user /usr/bin/defaults write -g _HIHideMenuBar -bool true ;;
-    0|false|FALSE|NO|no) run_as_user /usr/bin/defaults write -g _HIHideMenuBar -bool false ;;
-    *) run_as_user /usr/bin/defaults delete -g _HIHideMenuBar 2>/dev/null || true ;;
+    1|true|TRUE|YES|yes)
+        run_as_user /usr/bin/defaults write -g _HIHideMenuBar -bool true
+        run_as_user /usr/bin/osascript -e 'tell application "System Events" to tell dock preferences to set autohide menu bar to true' 2>/dev/null || true
+        ;;
+    0|false|FALSE|NO|no)
+        run_as_user /usr/bin/defaults write -g _HIHideMenuBar -bool false
+        run_as_user /usr/bin/osascript -e 'tell application "System Events" to tell dock preferences to set autohide menu bar to false' 2>/dev/null || true
+        ;;
+    *)
+        run_as_user /usr/bin/defaults delete -g _HIHideMenuBar 2>/dev/null || true
+        run_as_user /usr/bin/osascript -e 'tell application "System Events" to tell dock preferences to set autohide menu bar to false' 2>/dev/null || true
+        ;;
 esac
 
 # Finder & NSFileViewer

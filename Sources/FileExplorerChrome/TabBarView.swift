@@ -26,9 +26,9 @@ struct TabBarView: View {
                 .frame(height: 1)
 
             HStack(spacing: 0) {
-                // Leave ~78px clear on the left for macOS traffic lights (close / minimize / zoom).
+                // Leave ~78px clear on the left for macOS traffic lights when Win11Shell is not active.
                 WindowDragArea()
-                    .frame(width: 78, height: tabBarHeight)
+                    .frame(width: WindowConfiguratorNSView.shouldHideNativeTrafficLights ? 8 : 78, height: tabBarHeight)
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .bottom, spacing: 0) {

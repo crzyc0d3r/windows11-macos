@@ -154,6 +154,7 @@ run_as_user /usr/bin/defaults write com.apple.dock autohide-delay -float 1000
 run_as_user /usr/bin/defaults write com.apple.dock autohide-time-modifier -float 0
 run_as_user /usr/bin/defaults write com.apple.dock no-bouncing -bool true
 run_as_user /usr/bin/defaults write -g _HIHideMenuBar -bool true
+run_as_user /usr/bin/osascript -e 'tell application "System Events" to tell dock preferences to set autohide menu bar to true' 2>/dev/null || true
 
 echo "4. Installing LaunchAgent for Win11Shell..."
 mkdir -p "$LAUNCH_AGENT_DIR" "$LOGS_DIR"

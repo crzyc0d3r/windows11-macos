@@ -24,6 +24,10 @@ public struct WindowConfigurator: NSViewRepresentable {
 }
 
 public final class WindowConfiguratorNSView: NSView {
+    public static var shouldHideNativeTrafficLights: Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.hackedple.win11shell").isEmpty
+    }
+
     var theme: AppTheme = .system
 
     override public func viewDidMoveToWindow() {
@@ -40,6 +44,11 @@ public final class WindowConfiguratorNSView: NSView {
         }
         window.isMovableByWindowBackground = false
         window.minSize = NSSize(width: 920, height: 580)
+
+        let hideTrafficLights = Self.shouldHideNativeTrafficLights
+        for buttonType: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(buttonType)?.isHidden = hideTrafficLights
+        }
 
         let targetAppearance: NSAppearance?
         switch theme {

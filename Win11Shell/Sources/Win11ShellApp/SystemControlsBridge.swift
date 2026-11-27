@@ -302,11 +302,21 @@ public final class SystemControlsBridge {
     public func setTopMenuBarHidden(_ hidden: Bool) {
         topMenuBarHidden = hidden
         Task.detached {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-            proc.arguments = ["write", "-g", "_HIHideMenuBar", "-bool", hidden ? "true" : "false"]
-            try? proc.run()
-            proc.waitUntilExit()
+            let defaultsProc = Process()
+            defaultsProc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+            defaultsProc.arguments = ["write", "-g", "_HIHideMenuBar", "-bool", hidden ? "true" : "false"]
+            try? defaultsProc.run()
+            defaultsProc.waitUntilExit()
+
+            let osaProc = Process()
+            osaProc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            osaProc.arguments = [
+                "-e",
+                "tell application \"System Events\" to tell dock preferences to set autohide menu bar to \(hidden ? "true" : "false")"
+            ]
+            try? osaProc.run()
+            osaProc.waitUntilExit()
+
             let ui = Process()
             ui.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
             ui.arguments = ["SystemUIServer"]
