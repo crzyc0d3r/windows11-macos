@@ -1,6 +1,16 @@
 import FileExplorerCore
 import SwiftUI
 
+public extension Color {
+    /// Creates a SwiftUI Color from a 24-bit sRGB hex literal (e.g. `0x0067C0`).
+    init(fluentHex hex: UInt32, opacity: Double = 1.0) {
+        let r = Double((hex >> 16) & 0xFF) / 255.0
+        let g = Double((hex >> 8) & 0xFF) / 255.0
+        let b = Double(hex & 0xFF) / 255.0
+        self.init(.sRGB, red: r, green: g, blue: b, opacity: opacity)
+    }
+}
+
 public struct FluentPalette: Sendable {
     public let mica: Color
     public let micaAlt: Color
@@ -58,63 +68,104 @@ public struct FluentPalette: Sendable {
     public static let light = light(accent: .windowsBlue)
     public static let dark = dark(accent: .windowsBlue)
 
+    /// Exact Windows 11 24H2 Light Mode palette.
     public static func light(accent: AccentColorChoice = .windowsBlue) -> FluentPalette {
         let accentColor = accentColorValue(for: accent, isDark: false)
         return FluentPalette(
-            mica: Color(red: 0.953, green: 0.961, blue: 0.976),
-            micaAlt: Color(red: 0.922, green: 0.933, blue: 0.953),
-            commandBar: Color(red: 0.973, green: 0.976, blue: 0.984).opacity(0.88),
-            navPane: Color(red: 0.945, green: 0.953, blue: 0.969).opacity(0.78),
-            contentCanvas: Color(red: 0.988, green: 0.990, blue: 0.996),
-            statusBar: Color(red: 0.953, green: 0.961, blue: 0.976).opacity(0.92),
-            cardSurface: Color.white.opacity(0.85),
-            elevatedFlyout: Color(red: 0.984, green: 0.988, blue: 0.996),
-            borderSubtle: Color.black.opacity(0.075),
-            inputBottomStroke: Color.black.opacity(0.45),
-            textPrimary: Color(red: 0.102, green: 0.106, blue: 0.118),
-            textSecondary: Color(red: 0.365, green: 0.380, blue: 0.420),
-            hoverFill: Color.black.opacity(0.045),
-            selectionFill: accentColor.opacity(0.16),
+            mica: Color(fluentHex: 0xE8E8E8),
+            micaAlt: Color(fluentHex: 0xDADADA),
+            commandBar: Color(fluentHex: 0xF9F9F9),
+            navPane: Color(fluentHex: 0xF3F3F3),
+            contentCanvas: Color(fluentHex: 0xFFFFFF),
+            statusBar: Color(fluentHex: 0xF3F3F3),
+            cardSurface: Color(fluentHex: 0xFCFCFC),
+            elevatedFlyout: Color(fluentHex: 0xFCFCFC),
+            borderSubtle: Color(fluentHex: 0xE5E5E5),
+            inputBottomStroke: Color(fluentHex: 0x8A8A8A),
+            textPrimary: Color(fluentHex: 0x1A1A1A),
+            textSecondary: Color(fluentHex: 0x5F5F5F),
+            hoverFill: Color.black.opacity(0.04),
+            selectionFill: accentColor.opacity(0.12),
             accentBlue: accentColor,
-            dangerRed: Color(red: 0.769, green: 0.169, blue: 0.110)
+            dangerRed: Color(fluentHex: 0xC42B1C)
         )
     }
 
+    /// Exact Windows 11 24H2 Dark Mode palette.
     public static func dark(accent: AccentColorChoice = .windowsBlue) -> FluentPalette {
         let accentColor = accentColorValue(for: accent, isDark: true)
         return FluentPalette(
-            mica: Color(red: 0.125, green: 0.129, blue: 0.141),
-            micaAlt: Color(red: 0.102, green: 0.106, blue: 0.118),
-            commandBar: Color(red: 0.157, green: 0.161, blue: 0.176).opacity(0.86),
-            navPane: Color(red: 0.133, green: 0.137, blue: 0.153).opacity(0.76),
-            contentCanvas: Color(red: 0.098, green: 0.102, blue: 0.114),
-            statusBar: Color(red: 0.125, green: 0.129, blue: 0.141).opacity(0.92),
-            cardSurface: Color.white.opacity(0.055),
-            elevatedFlyout: Color(red: 0.173, green: 0.176, blue: 0.192),
-            borderSubtle: Color.white.opacity(0.085),
-            inputBottomStroke: Color.white.opacity(0.50),
-            textPrimary: Color(red: 0.961, green: 0.965, blue: 0.976),
-            textSecondary: Color(red: 0.678, green: 0.694, blue: 0.725),
-            hoverFill: Color.white.opacity(0.065),
-            selectionFill: accentColor.opacity(0.24),
+            mica: Color(fluentHex: 0x181818),
+            micaAlt: Color(fluentHex: 0x0A0A0A),
+            commandBar: Color(fluentHex: 0x202020),
+            navPane: Color(fluentHex: 0x1F1F1F),
+            contentCanvas: Color(fluentHex: 0x191919),
+            statusBar: Color(fluentHex: 0x1C1C1C),
+            cardSurface: Color(fluentHex: 0x2C2C2C),
+            elevatedFlyout: Color(fluentHex: 0x2C2C2C),
+            borderSubtle: Color.white.opacity(0.08),
+            inputBottomStroke: Color.white.opacity(0.22),
+            textPrimary: Color(fluentHex: 0xFFFFFF),
+            textSecondary: Color(fluentHex: 0xA8A8A8),
+            hoverFill: Color.white.opacity(0.06),
+            selectionFill: accentColor.opacity(0.16),
             accentBlue: accentColor,
-            dangerRed: Color(red: 0.965, green: 0.420, blue: 0.396)
+            dangerRed: Color(fluentHex: 0xFF99A4)
         )
     }
 
-    private static func accentColorValue(for choice: AccentColorChoice, isDark: Bool) -> Color {
+    public static func accentColorValue(for choice: AccentColorChoice, isDark: Bool) -> Color {
         switch (choice, isDark) {
-        case (.windowsBlue, false): return Color(red: 0.000, green: 0.404, blue: 0.753)
-        case (.windowsBlue, true):  return Color(red: 0.376, green: 0.804, blue: 1.000)
-        case (.teal, false):        return Color(red: 0.000, green: 0.471, blue: 0.478)
-        case (.teal, true):         return Color(red: 0.302, green: 0.816, blue: 0.827)
-        case (.purple, false):      return Color(red: 0.455, green: 0.302, blue: 0.773)
-        case (.purple, true):       return Color(red: 0.722, green: 0.580, blue: 0.965)
-        case (.amber, false):       return Color(red: 0.761, green: 0.439, blue: 0.000)
-        case (.amber, true):        return Color(red: 0.988, green: 0.725, blue: 0.255)
-        case (.rose, false):        return Color(red: 0.753, green: 0.165, blue: 0.388)
-        case (.rose, true):         return Color(red: 0.965, green: 0.471, blue: 0.659)
+        case (.windowsBlue, false): return Color(fluentHex: 0x0067C0)
+        case (.windowsBlue, true):  return Color(fluentHex: 0x60CDFF)
+        case (.teal, false):        return Color(fluentHex: 0x00787A)
+        case (.teal, true):         return Color(fluentHex: 0x4DD0D3)
+        case (.purple, false):      return Color(fluentHex: 0x744DC5)
+        case (.purple, true):       return Color(fluentHex: 0xB894F6)
+        case (.amber, false):       return Color(fluentHex: 0xC27000)
+        case (.amber, true):        return Color(fluentHex: 0xFCB941)
+        case (.rose, false):        return Color(fluentHex: 0xC02A63)
+        case (.rose, true):         return Color(fluentHex: 0xF678A8)
         }
+    }
+}
+
+public extension FluentPalette {
+    /// Stronger selection fill (hover on selected row or active focus).
+    var selectionHoverFill: Color {
+        accentBlue.opacity(0.18)
+    }
+
+    /// Subtle pressed control fill.
+    var pressedFill: Color {
+        hoverFill.opacity(1.5)
+    }
+
+    /// Active tab & address row surface color (`#F3F3F3` Light / `#2C2C2C` Dark).
+    func activeTabSurface(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(fluentHex: 0x2C2C2C) : Color(fluentHex: 0xF3F3F3)
+    }
+
+    /// Translucent Mica Alt tab bar overlay (`#E8E8E8` 82% Light / `#181818` 88% Dark).
+    func tabBarTranslucent(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color(fluentHex: 0x181818, opacity: 0.88)
+            : Color(fluentHex: 0xE8E8E8, opacity: 0.82)
+    }
+
+    /// Solid danger fill (`#C42B1C` Light / `#E81123` Dark).
+    func dangerSolid(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(fluentHex: 0xE81123) : Color(fluentHex: 0xC42B1C)
+    }
+
+    /// Drive capacity bar blue (`#0067C0` Light / `#60CDFF` Dark).
+    func capacityBlue(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(fluentHex: 0x60CDFF) : Color(fluentHex: 0x0067C0)
+    }
+
+    /// Subtle input control fill (`#FFFFFF` Light / `#272727` Dark).
+    func inputFill(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color(fluentHex: 0x272727) : Color(fluentHex: 0xFFFFFF)
     }
 }
 
@@ -124,10 +175,18 @@ public struct FluentTheme: Sendable {
     public let palette: FluentPalette
     public let isCompact: Bool
 
+    public var isDark: Bool { colorScheme == .dark }
     public var rowHeight: CGFloat { isCompact ? 26 : 32 }
     public var cornerRadiusSmall: CGFloat { 4 }
     public var cornerRadiusMedium: CGFloat { 6 }
     public var cornerRadiusLarge: CGFloat { 8 }
+    public var cornerRadiusTab: CGFloat { 8 }
+
+    public var activeTabSurface: Color { palette.activeTabSurface(for: colorScheme) }
+    public var tabBarTranslucent: Color { palette.tabBarTranslucent(for: colorScheme) }
+    public var dangerSolid: Color { palette.dangerSolid(for: colorScheme) }
+    public var capacityBlue: Color { palette.capacityBlue(for: colorScheme) }
+    public var inputFill: Color { palette.inputFill(for: colorScheme) }
 
     public init(
         colorScheme: ColorScheme = .light,
