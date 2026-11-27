@@ -122,6 +122,7 @@ public final class WindowChromeBarController: NSObject {
     private var trafficLightMaskView: TrafficLightMaskNSView?
     private var backgroundMasks: [CGWindowID: (panel: NonActivatingFloatingPanel, view: TrafficLightMaskNSView, pid: pid_t)] = [:]
     private var cachedMaskRelativeOffsets: [CGWindowID: CGRect] = [:]
+    private var noTrafficLightWindowIDs: Set<CGWindowID> = []
     private weak var dragZoneNSView: NSView?
     private weak var leftNotchDragZoneNSView: NSView?
     private var sampledMaskColors: [String: NSColor] = [:]
@@ -286,6 +287,7 @@ public final class WindowChromeBarController: NSObject {
                     .compactMap { UInt32($0.dropFirst(pidPrefix.count)) }
                 for wid in expiredWIDs {
                     self.cachedMaskRelativeOffsets.removeValue(forKey: wid)
+                    self.noTrafficLightWindowIDs.remove(wid)
                     AccessibilityBridge.invalidateCaptureFilter(for: wid)
                     if self.cachedDragSnapshot?.windowID == wid {
                         self.cachedDragSnapshot = nil
@@ -688,8 +690,14 @@ public final class WindowChromeBarController: NSObject {
                 continue
             }
 
+            guard let relOffset = resolveRelativeMaskOffset(for: snap) else {
+                backgroundMasks[snap.windowID]?.panel.orderOut(nil)
+                backgroundMasks.removeValue(forKey: snap.windowID)
+                occludingRectsAX.append(snap.axBounds)
+                continue
+            }
+
             activeIDs.insert(snap.windowID)
-            let relOffset = resolveRelativeMaskOffset(for: snap)
             let bgMaskAX = CGRect(
                 x: snap.axBounds.minX + relOffset.minX,
                 y: snap.axBounds.minY + relOffset.minY,
@@ -752,26 +760,36 @@ public final class WindowChromeBarController: NSObject {
             backgroundMasks.removeValue(forKey: wid)
             cachedMaskRelativeOffsets.removeValue(forKey: wid)
         }
+        let visibleSnapshotIDs = Set(snapshots.map(\.windowID))
+        noTrafficLightWindowIDs = noTrafficLightWindowIDs.intersection(visibleSnapshotIDs)
     }
 
-    private func resolveRelativeMaskOffset(for snap: OnScreenWindowSnapshot) -> CGRect {
+    private func resolveRelativeMaskOffset(for snap: OnScreenWindowSnapshot) -> CGRect? {
         if let cached = cachedMaskRelativeOffsets[snap.windowID] {
             return cached
         }
-        if let axWin = AccessibilityBridge.standardWindows(for: snap.pid).first(where: { $0.windowID == snap.windowID }),
-           let unionAX = AccessibilityBridge.trafficLightUnionAXRect(for: axWin.element) {
-            let rel = CGRect(
-                x: unionAX.minX - axWin.axFrame.minX,
-                y: unionAX.minY - axWin.axFrame.minY,
-                width: unionAX.width,
-                height: unionAX.height
-            )
-            cachedMaskRelativeOffsets[snap.windowID] = rel
-            return rel
+        if noTrafficLightWindowIDs.contains(snap.windowID) {
+            return nil
         }
-        let fallback = CGRect(x: 10, y: 8, width: 62, height: 22)
-        cachedMaskRelativeOffsets[snap.windowID] = fallback
-        return fallback
+        let standardWins = AccessibilityBridge.standardWindows(for: snap.pid)
+        if let axWin = standardWins.first(where: { $0.windowID == snap.windowID }) {
+            if let unionAX = AccessibilityBridge.trafficLightUnionAXRect(for: axWin.element) {
+                let rel = CGRect(
+                    x: unionAX.minX - axWin.axFrame.minX,
+                    y: unionAX.minY - axWin.axFrame.minY,
+                    width: unionAX.width,
+                    height: unionAX.height
+                )
+                cachedMaskRelativeOffsets[snap.windowID] = rel
+                return rel
+            }
+            noTrafficLightWindowIDs.insert(snap.windowID)
+            return nil
+        }
+        if !standardWins.isEmpty {
+            noTrafficLightWindowIDs.insert(snap.windowID)
+        }
+        return nil
     }
 
     private func syncTrafficLightMask(
@@ -1328,38 +1346,44 @@ public final class WindowChromeBarController: NSObject {
                 }
 
                 if !excluded && !isFullscreen {
-                    let estimatedH = WindowChromeGeometry.estimatedNativeTitlebarHeight(
-                        trafficLightRelativeRect: cachedMaskRelativeOffsets[snap.windowID]
-                    )
-                    let titlebarH = snap.axBounds.height >= 160
-                        ? min(max(52, estimatedH), snap.axBounds.height * 0.35)
-                        : estimatedH
-                    if WindowChromeGeometry.isInNativeTitlebarBand(
-                        axPoint: locationAX,
-                        windowAXFrame: snap.axBounds,
-                        titlebarHeight: titlebarH,
-                        resizeBorder: 4
-                    ) {
-                        let hit = AccessibilityBridge.classifyTitlebarHit(atAXPoint: locationAX, pid: snap.pid)
-                        if hit == .trafficLight || hit == .nativeTitlebarDragSurface {
-                            isBlockingNativeTitlebarDrag = true
-                            if snap.windowID != currentWindow?.windowID {
-                                let targetPID = snap.pid
-                                let targetWID = snap.windowID
-                                DispatchQueue.main.async { [weak self] in
-                                    self?.focusBackgroundWindow(pid: targetPID, windowID: targetWID)
+                    let trafficLightRel = (snap.windowID == currentWindow?.windowID)
+                        ? cachedMaskRelativeOffsets[snap.windowID]
+                        : resolveRelativeMaskOffset(for: snap)
+
+                    if let trafficLightRel {
+                        let estimatedH = WindowChromeGeometry.estimatedNativeTitlebarHeight(
+                            trafficLightRelativeRect: trafficLightRel
+                        )
+                        let titlebarH = snap.axBounds.height >= 160
+                            ? min(max(52, estimatedH), snap.axBounds.height * 0.35)
+                            : estimatedH
+                        if WindowChromeGeometry.isInNativeTitlebarBand(
+                            axPoint: locationAX,
+                            windowAXFrame: snap.axBounds,
+                            titlebarHeight: titlebarH,
+                            resizeBorder: 4
+                        ) {
+                            let hit = AccessibilityBridge.classifyTitlebarHit(atAXPoint: locationAX, pid: snap.pid)
+                            if hit == .trafficLight || hit == .nativeTitlebarDragSurface {
+                                isBlockingNativeTitlebarDrag = true
+                                if snap.windowID != currentWindow?.windowID {
+                                    let targetPID = snap.pid
+                                    let targetWID = snap.windowID
+                                    DispatchQueue.main.async { [weak self] in
+                                        self?.focusBackgroundWindow(pid: targetPID, windowID: targetWID)
+                                    }
                                 }
+                                return true
+                            } else if hit == .ambiguousContainer || hit == .unknown {
+                                let targetElement = (snap.windowID == currentWindow?.windowID) ? currentWindow?.element : nil
+                                nativeDragGuard = NativeDragGuard(
+                                    pid: snap.pid,
+                                    windowID: snap.windowID,
+                                    element: targetElement,
+                                    startOrigin: snap.axBounds.origin
+                                )
+                                return false
                             }
-                            return true
-                        } else if hit == .ambiguousContainer || hit == .unknown {
-                            let targetElement = (snap.windowID == currentWindow?.windowID) ? currentWindow?.element : nil
-                            nativeDragGuard = NativeDragGuard(
-                                pid: snap.pid,
-                                windowID: snap.windowID,
-                                element: targetElement,
-                                startOrigin: snap.axBounds.origin
-                            )
-                            return false
                         }
                     }
                 }
@@ -1505,7 +1529,6 @@ public final class WindowChromeBarController: NSObject {
 
                 if currentBundleID != model.config.fileExplorerBundleID {
                     dragGhostState.trafficLightMaskRectLocal = cachedMaskRelativeOffsets[win.windowID]
-                        ?? CGRect(x: 10, y: 8, width: 62, height: 22)
                     dragGhostState.trafficLightMaskColor = sampledMaskColors["\(win.pid)-\(win.windowID)"]
                         ?? defaultMaskFallbackColor()
                 } else {
