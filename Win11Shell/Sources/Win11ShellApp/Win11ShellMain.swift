@@ -277,6 +277,9 @@ final class ShellCoordinator {
         windowSnap.onWindowFrameChanged = { [weak windowBar] in
             windowBar?.syncActiveWindow()
         }
+        windowBar.onInteractionStateChanged = { [weak model] active in
+            model?.isUserInteractingWithWindow = active
+        }
 
         finderSuppressor.start()
         activatePermissionGatedFeatures(initialRun: true)
