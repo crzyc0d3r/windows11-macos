@@ -25,6 +25,7 @@ public final class WindowChromeBarController: NSObject {
     private var snapPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskView: TrafficLightMaskNSView?
+    private weak var dragZoneNSView: NSView?
     private var sampledMaskColors: [String: NSColor] = [:]
     private var pendingMaskColorKeys: Set<String> = []
     private var syncTimer: Timer?
@@ -35,6 +36,16 @@ public final class WindowChromeBarController: NSObject {
     private var currentWindow: AXWindowInfo?
     private var currentBundleID: String = ""
     private var isDraggingTargetWindow = false
+    private var dragTargetWindow: AXWindowInfo?
+    private var dragStartMouseAX: CGPoint = .zero
+    private var dragStartWindowFrameAX: CGRect = .zero
+    private var dragStartPanelFrameCocoa: CGRect = .zero
+    private var dragStartMaskOriginCocoa: CGPoint?
+    private var dragWasMaximized = false
+    private var dragDidUnmaximize = false
+    private var dragMinSafeAXTop: CGFloat = 28
+    private var mouseDragTap: CFMachPort?
+    private var mouseDragRunLoopSource: CFRunLoopSource?
     private var snapDismissWork: DispatchWorkItem?
 
     public init(model: RunningAppsModel, snapManager: WindowSnapManager) {
@@ -75,6 +86,9 @@ public final class WindowChromeBarController: NSObject {
             },
             onOverflowMenusClick: { [weak self] items, sourceView in
                 self?.openOverflowMenus(items: items, anchorView: sourceView)
+            },
+            onDragZoneReady: { [weak self] view in
+                self?.dragZoneNSView = view
             },
             onDragDelta: { [weak self] dx, dy in
                 self?.dragCurrentWindow(deltaX: dx, deltaY: dy)
@@ -389,9 +403,254 @@ public final class WindowChromeBarController: NSObject {
         }
     }
 
+    // MARK: - Hardware-Level CGEventTap Window Drag Engine
+
+    @discardableResult
+    public func startMouseDragTap() -> Bool {
+        if mouseDragTap != nil {
+            return true
+        }
+        let mask = CGEventMask(
+            (1 << CGEventType.leftMouseDown.rawValue)
+                | (1 << CGEventType.leftMouseDragged.rawValue)
+                | (1 << CGEventType.leftMouseUp.rawValue)
+        )
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, userInfo -> Unmanaged<CGEvent>? in
+                guard let userInfo else { return Unmanaged.passUnretained(event) }
+                let ctrl = Unmanaged<WindowChromeBarController>.fromOpaque(userInfo).takeUnretainedValue()
+                return ctrl.handleMouseTapCallback(type: type, event: event)
+            },
+            userInfo: refcon
+        ) else {
+            return false
+        }
+
+        mouseDragTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        mouseDragRunLoopSource = source
+        if let source {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    public func stopMouseDragTap() {
+        if let tap = mouseDragTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = mouseDragRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        mouseDragTap = nil
+        mouseDragRunLoopSource = nil
+        isDraggingTargetWindow = false
+        snapManager.suppressGlobalDragMonitor = false
+    }
+
+    nonisolated private func handleMouseTapCallback(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            Task { @MainActor [weak self] in
+                if let tap = self?.mouseDragTap {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard Thread.isMainThread else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let locationAX = event.location
+        let clickCount = event.getIntegerValueField(.mouseEventClickState)
+
+        let swallow = MainActor.assumeIsolated { () -> Bool in
+            switch type {
+            case .leftMouseDown:
+                return handleTapMouseDown(locationAX: locationAX, clickCount: clickCount)
+            case .leftMouseDragged:
+                return handleTapMouseDragged(locationAX: locationAX)
+            case .leftMouseUp:
+                return handleTapMouseUp()
+            default:
+                return false
+            }
+        }
+
+        return swallow ? nil : Unmanaged.passUnretained(event)
+    }
+
+    private func dragZoneScreenRectCocoa() -> CGRect? {
+        guard let panel, panel.isVisible else { return nil }
+        if let view = dragZoneNSView, view.window === panel, view.bounds.width > 8 {
+            let rectInWin = view.convert(view.bounds, to: nil)
+            return panel.convertToScreen(rectInWin)
+        }
+        // Fallback: middle strip between left menus and right 126pt caption buttons
+        let f = panel.frame
+        let leftInset: CGFloat = min(220, f.width * 0.35)
+        let rightInset: CGFloat = 126
+        guard f.width > leftInset + rightInset else { return nil }
+        return CGRect(x: f.minX + leftInset, y: f.minY, width: f.width - leftInset - rightInset, height: f.height)
+    }
+
+    private func handleTapMouseDown(locationAX: CGPoint, clickCount: Int64) -> Bool {
+        guard let panel, panel.isVisible, let win = currentWindow else {
+            return false
+        }
+
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
+
+        let inTitleDrag = dragZoneScreenRectCocoa()?.contains(cocoaPt) ?? false
+        let inTrafficMask = (trafficLightMaskPanel?.isVisible == true)
+            && (trafficLightMaskPanel?.frame.contains(cocoaPt) == true)
+
+        guard inTitleDrag || inTrafficMask else {
+            return false
+        }
+
+        if clickCount == 2 {
+            DispatchQueue.main.async { [weak self] in
+                self?.toggleMaximizeCurrentWindow()
+            }
+            return true
+        }
+
+        let liveWin = AccessibilityBridge.windowInfo(for: win.element, pid: win.pid) ?? win
+        let screen = AccessibilityBridge.screenContaining(axFrame: liveWin.axFrame) ?? NSScreen.main ?? NSScreen.screens.first
+        let barH = CGFloat(model.config.windowBarHeight)
+        let screenTopAX = screen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
+
+        currentWindow = liveWin
+        dragTargetWindow = liveWin
+        dragStartMouseAX = locationAX
+        dragStartWindowFrameAX = liveWin.axFrame
+        dragStartPanelFrameCocoa = panel.frame
+        dragStartMaskOriginCocoa = (trafficLightMaskPanel?.isVisible == true) ? trafficLightMaskPanel?.frame.origin : nil
+        dragWasMaximized = screen.map { snapManager.isWindowMaximized(liveWin, on: $0) } ?? false
+        dragDidUnmaximize = false
+        dragMinSafeAXTop = screenTopAX + barH
+        isDraggingTargetWindow = true
+        snapManager.suppressGlobalDragMonitor = true
+        snapPanel?.orderOut(nil)
+        return true
+    }
+
+    private func handleTapMouseDragged(locationAX: CGPoint) -> Bool {
+        guard isDraggingTargetWindow, let win = dragTargetWindow, let panel else {
+            return false
+        }
+
+        var dx = locationAX.x - dragStartMouseAX.x
+        var dy = locationAX.y - dragStartMouseAX.y
+
+        if dragWasMaximized && !dragDidUnmaximize && hypot(dx, dy) > 10 {
+            let bid = currentBundleID.isEmpty ? (NSRunningApplication(processIdentifier: win.pid)?.bundleIdentifier ?? "") : currentBundleID
+            if let restored = snapManager.restoreFrameForDrag(window: win, bundleID: bid, cursorAX: locationAX) {
+                let updatedWin = AXWindowInfo(
+                    pid: win.pid,
+                    windowID: win.windowID,
+                    title: win.title,
+                    axFrame: restored,
+                    isMinimized: win.isMinimized,
+                    isFullScreen: win.isFullScreen,
+                    element: win.element
+                )
+                dragTargetWindow = updatedWin
+                currentWindow = updatedWin
+                dragStartWindowFrameAX = restored
+                dragStartMouseAX = locationAX
+                dragDidUnmaximize = true
+
+                let primaryH = AccessibilityBridge.primaryScreenHeight()
+                let barH = CGFloat(model.config.windowBarHeight)
+                let newBarFrame = CGRect(
+                    x: restored.minX,
+                    y: primaryH - restored.minY,
+                    width: restored.width,
+                    height: barH
+                )
+                panel.setFrame(newBarFrame, display: true)
+                dragStartPanelFrameCocoa = newBarFrame
+                if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible,
+                   let axMask = AccessibilityBridge.trafficLightUnionAXRect(for: win.element) {
+                    let cocoaMask = WindowChromeGeometry.axRectToCocoa(axMask, primaryScreenHeight: primaryH)
+                    maskPanel.setFrame(cocoaMask, display: true)
+                    dragStartMaskOriginCocoa = cocoaMask.origin
+                }
+                dx = 0
+                dy = 0
+            }
+        }
+
+        let targetX = (dragStartWindowFrameAX.origin.x + dx).rounded()
+        let targetY = max(dragMinSafeAXTop, dragStartWindowFrameAX.origin.y + dy).rounded()
+        let appliedDX = targetX - dragStartWindowFrameAX.origin.x
+        let appliedDY = targetY - dragStartWindowFrameAX.origin.y
+
+        let newOriginAX = CGPoint(x: targetX, y: targetY)
+        AccessibilityBridge.setPosition(win.element, origin: newOriginAX)
+
+        let updatedWin = AXWindowInfo(
+            pid: win.pid,
+            windowID: win.windowID,
+            title: win.title,
+            axFrame: CGRect(origin: newOriginAX, size: dragStartWindowFrameAX.size),
+            isMinimized: win.isMinimized,
+            isFullScreen: win.isFullScreen,
+            element: win.element
+        )
+        dragTargetWindow = updatedWin
+        currentWindow = updatedWin
+
+        panel.setFrameOrigin(NSPoint(
+            x: dragStartPanelFrameCocoa.origin.x + appliedDX,
+            y: dragStartPanelFrameCocoa.origin.y - appliedDY
+        ))
+        if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible, let startMaskOrigin = dragStartMaskOriginCocoa {
+            maskPanel.setFrameOrigin(NSPoint(
+                x: startMaskOrigin.x + appliedDX,
+                y: startMaskOrigin.y - appliedDY
+            ))
+        }
+
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let cocoaMouse = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
+        snapManager.updateDragPreview(mouseLocationCocoa: cocoaMouse)
+        return true
+    }
+
+    private func handleTapMouseUp() -> Bool {
+        guard isDraggingTargetWindow else {
+            return false
+        }
+        let win = dragTargetWindow ?? currentWindow
+        let bid = currentBundleID.isEmpty ? nil : currentBundleID
+        isDraggingTargetWindow = false
+        dragTargetWindow = nil
+        dragStartMaskOriginCocoa = nil
+        snapManager.suppressGlobalDragMonitor = false
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            _ = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
+            self.syncActiveWindow()
+        }
+        return true
+    }
+
     private func dragCurrentWindow(deltaX: CGFloat, deltaY: CGFloat) {
         guard let win = currentWindow, let panel else { return }
         isDraggingTargetWindow = true
+        snapManager.suppressGlobalDragMonitor = true
         let newOrigin = CGPoint(x: win.axFrame.origin.x + deltaX, y: win.axFrame.origin.y - deltaY)
         AccessibilityBridge.setPosition(win.element, origin: newOrigin)
         let updated = AXWindowInfo(
@@ -415,6 +674,7 @@ public final class WindowChromeBarController: NSObject {
         let win = currentWindow
         let bid = currentBundleID.isEmpty ? nil : currentBundleID
         isDraggingTargetWindow = false
+        snapManager.suppressGlobalDragMonitor = false
         _ = snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
         syncActiveWindow()
     }
@@ -584,6 +844,7 @@ private struct WindowChromeBarView: View {
     let state: WindowChromeBarState
     let onMenuClick: (MirroredMenuItem, NSView) -> Void
     let onOverflowMenusClick: ([MirroredMenuItem], NSView) -> Void
+    let onDragZoneReady: (NSView) -> Void
     let onDragDelta: (CGFloat, CGFloat) -> Void
     let onDragEnded: () -> Void
     let onDoubleClickTitle: () -> Void
@@ -622,6 +883,7 @@ private struct WindowChromeBarView: View {
             // Draggable title strip
             ChromeTitleDragArea(
                 title: state.windowTitle,
+                onViewReady: onDragZoneReady,
                 onDragDelta: onDragDelta,
                 onDragEnded: onDragEnded,
                 onDoubleClick: onDoubleClickTitle
@@ -738,6 +1000,7 @@ private struct CaptionButton: View {
 
 private struct ChromeTitleDragArea: NSViewRepresentable {
     let title: String
+    let onViewReady: (NSView) -> Void
     let onDragDelta: (CGFloat, CGFloat) -> Void
     let onDragEnded: () -> Void
     let onDoubleClick: () -> Void
@@ -748,6 +1011,9 @@ private struct ChromeTitleDragArea: NSViewRepresentable {
         v.onDragEnded = onDragEnded
         v.onDoubleClick = onDoubleClick
         v.title = title
+        DispatchQueue.main.async {
+            onViewReady(v)
+        }
         return v
     }
 
@@ -756,6 +1022,7 @@ private struct ChromeTitleDragArea: NSViewRepresentable {
         nsView.onDragDelta = onDragDelta
         nsView.onDragEnded = onDragEnded
         nsView.onDoubleClick = onDoubleClick
+        onViewReady(nsView)
     }
 }
 

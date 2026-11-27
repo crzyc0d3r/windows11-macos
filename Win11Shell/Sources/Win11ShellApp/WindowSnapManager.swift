@@ -18,6 +18,7 @@ public final class WindowSnapManager {
     private var dragSawWindowMove = false
 
     public var onWindowFrameChanged: (() -> Void)?
+    public var suppressGlobalDragMonitor: Bool = false
 
     public init(model: RunningAppsModel) {
         self.model = model
@@ -123,6 +124,31 @@ public final class WindowSnapManager {
             taskbarHeight: CGFloat(model.config.taskbarHeight)
         )
         return abs(win.axFrame.width - maxAX.width) < 12 && abs(win.axFrame.height - maxAX.height) < 12
+    }
+
+    public func restoreFrameForDrag(window: AXWindowInfo, bundleID: String, cursorAX: CGPoint) -> CGRect? {
+        guard let screen = AccessibilityBridge.screenContaining(axFrame: window.axFrame) else {
+            return nil
+        }
+        let key = windowKey(window, bundleID: bundleID)
+        let baseFrame = savedRestoreFrames.removeValue(forKey: key) ?? centeredRestoreAXFrame(on: screen)
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let barH = CGFloat(model.config.windowBarHeight)
+        let screenTopAX = primaryH - min(screen.visibleFrame.maxY, screen.frame.maxY)
+        let minTopAX = screenTopAX + barH
+
+        let desiredX = cursorAX.x - (baseFrame.width / 2)
+        let clampedX = max(screen.frame.minX, min(desiredX, screen.frame.maxX - baseFrame.width))
+        let clampedY = max(minTopAX, cursorAX.y + 14)
+
+        let restored = CGRect(
+            x: clampedX.rounded(),
+            y: clampedY.rounded(),
+            width: baseFrame.width.rounded(),
+            height: baseFrame.height.rounded()
+        )
+        AccessibilityBridge.setFrame(window.element, axFrame: restored)
+        return restored
     }
 
     // MARK: - Launch Normalization
@@ -268,6 +294,7 @@ public final class WindowSnapManager {
     }
 
     private func handleGlobalMouseDown() {
+        guard !suppressGlobalDragMonitor else { return }
         dragCandidateWindow = nil
         dragCandidateBundleID = ""
         dragStartFrame = .zero
@@ -292,7 +319,7 @@ public final class WindowSnapManager {
     }
 
     private func handleGlobalMouseDragged() {
-        guard let candidate = dragCandidateWindow else { return }
+        guard !suppressGlobalDragMonitor, let candidate = dragCandidateWindow else { return }
 
         if !dragSawWindowMove {
             guard let live = AccessibilityBridge.windowInfo(for: candidate.element, pid: candidate.pid) else {
@@ -315,6 +342,7 @@ public final class WindowSnapManager {
     }
 
     private func handleGlobalMouseUp() {
+        guard !suppressGlobalDragMonitor else { return }
         defer {
             dragCandidateWindow = nil
             dragCandidateBundleID = ""

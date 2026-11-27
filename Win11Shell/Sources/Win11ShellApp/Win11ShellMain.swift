@@ -209,6 +209,7 @@ final class ShellCoordinator {
 
     private var didNormalizeWindows = false
     private var eventTapStarted = false
+    private var mouseDragTapStarted = false
     private var didApplyHIDSwap = false
     private var permissionTimer: Timer?
 
@@ -264,7 +265,7 @@ final class ShellCoordinator {
         finderSuppressor.start()
         activatePermissionGatedFeatures(initialRun: true)
 
-        if !didNormalizeWindows || !eventTapStarted {
+        if !didNormalizeWindows || !eventTapStarted || !mouseDragTapStarted {
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.activatePermissionGatedFeatures(initialRun: false)
@@ -300,7 +301,17 @@ final class ShellCoordinator {
             }
         }
 
-        if didNormalizeWindows && eventTapStarted {
+        if !mouseDragTapStarted {
+            let dragStarted = windowBar.startMouseDragTap()
+            if dragStarted {
+                mouseDragTapStarted = true
+                ShellLogger.log("WindowChromeBar mouse drag tap started: true")
+            } else if initialRun {
+                ShellLogger.log("WindowChromeBar mouse drag tap started: false (waiting for Input Monitoring)")
+            }
+        }
+
+        if didNormalizeWindows && eventTapStarted && mouseDragTapStarted {
             permissionTimer?.invalidate()
             permissionTimer = nil
         }
@@ -310,6 +321,7 @@ final class ShellCoordinator {
         permissionTimer?.invalidate()
         permissionTimer = nil
         keyboardEngine.stop()
+        windowBar.stopMouseDragTap()
         if didApplyHIDSwap {
             Self.resetBuiltInHIDSwapSync()
             didApplyHIDSwap = false
