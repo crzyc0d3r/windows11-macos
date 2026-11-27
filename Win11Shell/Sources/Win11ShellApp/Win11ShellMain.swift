@@ -162,11 +162,28 @@ final class ShellAppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: ShellCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let hasOtherInstance = NSRunningApplication
+            .runningApplications(withBundleIdentifier: "com.hackedple.win11shell")
+            .contains { $0.processIdentifier != currentPID }
+        if hasOtherInstance {
+            ShellLogger.log("Another Win11Shell instance is already running; exiting.")
+            NSApp.terminate(nil)
+            return
+        }
+
         let axGranted = AccessibilityBridge.hasAccessibilityPermission(prompt: true)
         let inputGranted = AccessibilityBridge.hasInputMonitoringPermission()
+        if !inputGranted {
+            _ = CGRequestListenEventAccess()
+        }
         let screenGranted = AccessibilityBridge.hasScreenRecordingPermission()
         ShellLogger.log("Win11Shell starting (AX=\(axGranted), InputMonitoring=\(inputGranted), ScreenRecording=\(screenGranted))")
         coordinator = ShellCoordinator()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        coordinator?.cleanupBeforeTermination()
     }
 }
 
@@ -189,6 +206,11 @@ final class ShellCoordinator {
     private let taskbar: TaskbarCoordinator
     private let altTabSwitcher: AltTabSwitcherController
     private let keyboardEngine: CustomKeyboardEngine
+
+    private var didNormalizeWindows = false
+    private var eventTapStarted = false
+    private var didApplyHIDSwap = false
+    private var permissionTimer: Timer?
 
     init() {
         let model = RunningAppsModel(configStore: configStore)
@@ -239,16 +261,73 @@ final class ShellCoordinator {
             windowBar?.syncActiveWindow()
         }
 
-        _ = windowSnap.normalizeVisibleWindows()
-        windowBar.syncActiveWindow()
         finderSuppressor.start()
+        activatePermissionGatedFeatures(initialRun: true)
 
-        Self.applyBuiltInHIDSwapAsync()
-
-        let tapStarted = keyboardEngine.start { [weak self] action in
-            self?.handleAction(action)
+        if !didNormalizeWindows || !eventTapStarted {
+            permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.activatePermissionGatedFeatures(initialRun: false)
+                }
+            }
         }
-        ShellLogger.log("CustomKeyboardEngine event tap started: \(tapStarted)")
+    }
+
+    private func activatePermissionGatedFeatures(initialRun: Bool) {
+        if !didNormalizeWindows && AccessibilityBridge.hasAccessibilityPermission(prompt: false) {
+            let count = windowSnap.normalizeVisibleWindows()
+            windowBar.syncActiveWindow()
+            didNormalizeWindows = true
+            if !initialRun {
+                ShellLogger.log("Accessibility permission granted; normalized \(count) window(s) and enabled window chrome")
+            }
+        } else if initialRun && !didNormalizeWindows {
+            _ = windowSnap.normalizeVisibleWindows()
+            windowBar.syncActiveWindow()
+        }
+
+        if !eventTapStarted {
+            let started = keyboardEngine.start { [weak self] action in
+                self?.handleAction(action)
+            }
+            if started {
+                eventTapStarted = true
+                Self.applyBuiltInHIDSwapAsync()
+                didApplyHIDSwap = true
+                ShellLogger.log("CustomKeyboardEngine event tap started: true")
+            } else if initialRun {
+                ShellLogger.log("CustomKeyboardEngine event tap started: false (waiting for Input Monitoring; built-in hidutil swap deferred)")
+            }
+        }
+
+        if didNormalizeWindows && eventTapStarted {
+            permissionTimer?.invalidate()
+            permissionTimer = nil
+        }
+    }
+
+    func cleanupBeforeTermination() {
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+        keyboardEngine.stop()
+        if didApplyHIDSwap {
+            Self.resetBuiltInHIDSwapSync()
+            didApplyHIDSwap = false
+        }
+    }
+
+    private static func resetBuiltInHIDSwapSync() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/hidutil")
+        proc.arguments = [
+            "property",
+            "--matching", HIDMappingGenerator.builtInMatchingJSON(),
+            "--set", HIDMappingGenerator.resetPropertyJSON()
+        ]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
     }
 
     private static func applyBuiltInHIDSwapAsync() {
