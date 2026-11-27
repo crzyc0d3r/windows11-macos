@@ -293,6 +293,8 @@ final class ShellCoordinator {
             }
             if started {
                 eventTapStarted = true
+                system.eventTapActive = true
+                system.refreshPermissions()
                 Self.applyBuiltInHIDSwapAsync()
                 didApplyHIDSwap = true
                 ShellLogger.log("CustomKeyboardEngine event tap started: true")

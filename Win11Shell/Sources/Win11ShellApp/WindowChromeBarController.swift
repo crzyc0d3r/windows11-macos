@@ -25,10 +25,13 @@ public final class WindowChromeBarController: NSObject {
     private var snapPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskView: TrafficLightMaskNSView?
+    private var backgroundMasks: [CGWindowID: (panel: NonActivatingFloatingPanel, view: TrafficLightMaskNSView, pid: pid_t)] = [:]
+    private var cachedMaskRelativeOffsets: [CGWindowID: CGRect] = [:]
     private weak var dragZoneNSView: NSView?
     private var sampledMaskColors: [String: NSColor] = [:]
     private var pendingMaskColorKeys: Set<String> = []
     private var syncTimer: Timer?
+    private var fastDragSyncTimer: Timer?
     private var axObserver: AXObserver?
     private var observedPID: pid_t = 0
     private var lastMenuPID: pid_t = 0
@@ -36,14 +39,15 @@ public final class WindowChromeBarController: NSObject {
     private var currentWindow: AXWindowInfo?
     private var currentBundleID: String = ""
     private var isDraggingTargetWindow = false
+    private var isExternalMouseDragging = false
     private var dragTargetWindow: AXWindowInfo?
     private var dragStartMouseAX: CGPoint = .zero
     private var dragStartWindowFrameAX: CGRect = .zero
-    private var dragStartPanelFrameCocoa: CGRect = .zero
-    private var dragStartMaskOriginCocoa: CGPoint?
     private var dragWasMaximized = false
     private var dragDidUnmaximize = false
     private var dragMinSafeAXTop: CGFloat = 28
+    private var pendingDragMouseAX: CGPoint?
+    private var dragStepScheduled = false
     private var mouseDragTap: CFMachPort?
     private var mouseDragRunLoopSource: CFRunLoopSource?
     private var snapDismissWork: DispatchWorkItem?
@@ -246,6 +250,8 @@ public final class WindowChromeBarController: NSObject {
         }
 
         syncTrafficLightMask(for: win, bundleID: bundleID, primaryScreenHeight: primaryH)
+        let barAXRect = WindowChromeGeometry.cocoaRectToAX(barRect, primaryScreenHeight: primaryH)
+        syncBackgroundMasks(frontWindowID: win.windowID, frontBarAXRect: barAXRect, primaryScreenHeight: primaryH)
     }
 
     private func hideBar() {
@@ -253,6 +259,196 @@ public final class WindowChromeBarController: NSObject {
         panel?.orderOut(nil)
         snapPanel?.orderOut(nil)
         trafficLightMaskPanel?.orderOut(nil)
+        if !model.config.showWindowChromeBar {
+            hideAllBackgroundMasks()
+        } else {
+            syncBackgroundMasks(
+                frontWindowID: nil,
+                frontBarAXRect: nil,
+                primaryScreenHeight: AccessibilityBridge.primaryScreenHeight()
+            )
+        }
+    }
+
+    private func hideAllBackgroundMasks() {
+        for (_, entry) in backgroundMasks {
+            entry.panel.orderOut(nil)
+        }
+        backgroundMasks.removeAll()
+    }
+
+    private func syncOverlayPositionsFromWindowServer() {
+        guard !isDraggingTargetWindow,
+              let win = currentWindow,
+              let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID),
+              let screen = AccessibilityBridge.screenContaining(axFrame: liveBounds)
+        else {
+            syncBackgroundMasks(
+                frontWindowID: currentWindow?.windowID,
+                frontBarAXRect: nil,
+                primaryScreenHeight: AccessibilityBridge.primaryScreenHeight()
+            )
+            return
+        }
+
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        if let barRect = WindowChromeGeometry.dockedBarFrame(
+            forAXWindowFrame: liveBounds,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen.frame,
+            visibleFrameCocoa: screen.visibleFrame,
+            barHeight: CGFloat(model.config.windowBarHeight),
+            taskbarHeight: CGFloat(model.config.taskbarHeight)
+        ) {
+            if let panel {
+                panel.setFrame(barRect, display: true)
+                if !panel.isVisible {
+                    panel.orderFrontRegardless()
+                }
+            }
+            if let rel = cachedMaskRelativeOffsets[win.windowID],
+               currentBundleID != model.config.fileExplorerBundleID,
+               let maskPanel = trafficLightMaskPanel {
+                let axMask = CGRect(
+                    x: liveBounds.minX + rel.minX,
+                    y: liveBounds.minY + rel.minY,
+                    width: rel.width,
+                    height: rel.height
+                )
+                let cocoaMask = WindowChromeGeometry.axRectToCocoa(axMask, primaryScreenHeight: primaryH)
+                maskPanel.setFrame(cocoaMask, display: true)
+                if !maskPanel.isVisible {
+                    maskPanel.orderFrontRegardless()
+                }
+            }
+            let barAXRect = WindowChromeGeometry.cocoaRectToAX(barRect, primaryScreenHeight: primaryH)
+            syncBackgroundMasks(frontWindowID: win.windowID, frontBarAXRect: barAXRect, primaryScreenHeight: primaryH)
+        }
+    }
+
+    private func syncBackgroundMasks(
+        frontWindowID: CGWindowID?,
+        frontBarAXRect: CGRect?,
+        primaryScreenHeight: CGFloat
+    ) {
+        guard model.config.showWindowChromeBar,
+              AccessibilityBridge.hasAccessibilityPermission(prompt: false)
+        else {
+            hideAllBackgroundMasks()
+            return
+        }
+
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let snapshots = AccessibilityBridge.onScreenNormalWindows()
+        var activeIDs: Set<CGWindowID> = []
+        var occludingRectsAX: [CGRect] = []
+        if let frontBarAXRect {
+            occludingRectsAX.append(frontBarAXRect)
+        }
+
+        for snap in snapshots {
+            if snap.pid == selfPID {
+                continue
+            }
+            if let frontWindowID, snap.windowID == frontWindowID {
+                occludingRectsAX.append(snap.axBounds)
+                continue
+            }
+
+            let app = NSRunningApplication(processIdentifier: snap.pid)
+            let bundleID = app?.bundleIdentifier ?? ""
+            if bundleID == model.config.fileExplorerBundleID
+                || bundleID == "com.apple.finder"
+                || model.config.windowBarExcludedBundleIDs.contains(bundleID) {
+                occludingRectsAX.append(snap.axBounds)
+                continue
+            }
+
+            activeIDs.insert(snap.windowID)
+            let relOffset = resolveRelativeMaskOffset(for: snap)
+            let bgMaskAX = CGRect(
+                x: snap.axBounds.minX + relOffset.minX,
+                y: snap.axBounds.minY + relOffset.minY,
+                width: relOffset.width,
+                height: relOffset.height
+            )
+            let isOccluded = occludingRectsAX.contains { $0.intersects(bgMaskAX) }
+
+            if isOccluded {
+                backgroundMasks[snap.windowID]?.panel.orderOut(nil)
+            } else {
+                let cocoaRect = WindowChromeGeometry.axRectToCocoa(bgMaskAX, primaryScreenHeight: primaryScreenHeight)
+                let entry: (panel: NonActivatingFloatingPanel, view: TrafficLightMaskNSView, pid: pid_t)
+                if let existing = backgroundMasks[snap.windowID] {
+                    entry = existing
+                } else {
+                    let p = NonActivatingFloatingPanel(
+                        contentRect: cocoaRect,
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered,
+                        defer: false
+                    )
+                    p.level = .floating
+                    p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+                    p.backgroundColor = .clear
+                    p.isOpaque = false
+                    p.hasShadow = false
+
+                    let v = TrafficLightMaskNSView(frame: NSRect(origin: .zero, size: cocoaRect.size))
+                    let targetPID = snap.pid
+                    let targetWID = snap.windowID
+                    v.onSimpleClick = {
+                        if let targetApp = NSRunningApplication(processIdentifier: targetPID) {
+                            targetApp.activate(options: [.activateAllWindows])
+                        }
+                        if let win = AccessibilityBridge.standardWindows(for: targetPID).first(where: { $0.windowID == targetWID }) {
+                            AccessibilityBridge.focusWindow(win)
+                        }
+                    }
+                    p.contentView = v
+                    entry = (p, v, snap.pid)
+                    backgroundMasks[snap.windowID] = entry
+                }
+
+                let colorKey = "\(snap.pid)-\(snap.windowID)"
+                entry.view.fillColor = sampledMaskColors[colorKey] ?? defaultMaskFallbackColor()
+                if entry.panel.frame != cocoaRect {
+                    entry.panel.setFrame(cocoaRect, display: true)
+                }
+                if !entry.panel.isVisible {
+                    entry.panel.orderFrontRegardless()
+                }
+            }
+
+            occludingRectsAX.append(snap.axBounds)
+        }
+
+        let staleIDs = backgroundMasks.keys.filter { !activeIDs.contains($0) }
+        for wid in staleIDs {
+            backgroundMasks[wid]?.panel.orderOut(nil)
+            backgroundMasks.removeValue(forKey: wid)
+            cachedMaskRelativeOffsets.removeValue(forKey: wid)
+        }
+    }
+
+    private func resolveRelativeMaskOffset(for snap: OnScreenWindowSnapshot) -> CGRect {
+        if let cached = cachedMaskRelativeOffsets[snap.windowID] {
+            return cached
+        }
+        if let axWin = AccessibilityBridge.standardWindows(for: snap.pid).first(where: { $0.windowID == snap.windowID }),
+           let unionAX = AccessibilityBridge.trafficLightUnionAXRect(for: axWin.element) {
+            let rel = CGRect(
+                x: unionAX.minX - axWin.axFrame.minX,
+                y: unionAX.minY - axWin.axFrame.minY,
+                width: unionAX.width,
+                height: unionAX.height
+            )
+            cachedMaskRelativeOffsets[snap.windowID] = rel
+            return rel
+        }
+        let fallback = CGRect(x: 10, y: 8, width: 62, height: 22)
+        cachedMaskRelativeOffsets[snap.windowID] = fallback
+        return fallback
     }
 
     private func syncTrafficLightMask(for win: AXWindowInfo, bundleID: String, primaryScreenHeight: CGFloat) {
@@ -261,6 +457,15 @@ public final class WindowChromeBarController: NSObject {
         else {
             trafficLightMaskPanel?.orderOut(nil)
             return
+        }
+
+        if win.windowID != 0 {
+            cachedMaskRelativeOffsets[win.windowID] = CGRect(
+                x: axMaskRect.minX - win.axFrame.minX,
+                y: axMaskRect.minY - win.axFrame.minY,
+                width: axMaskRect.width,
+                height: axMaskRect.height
+            )
         }
 
         let cocoaMaskRect = WindowChromeGeometry.axRectToCocoa(axMaskRect, primaryScreenHeight: primaryScreenHeight)
@@ -442,6 +647,8 @@ public final class WindowChromeBarController: NSObject {
     }
 
     public func stopMouseDragTap() {
+        fastDragSyncTimer?.invalidate()
+        fastDragSyncTimer = nil
         if let tap = mouseDragTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -451,7 +658,11 @@ public final class WindowChromeBarController: NSObject {
         mouseDragTap = nil
         mouseDragRunLoopSource = nil
         isDraggingTargetWindow = false
+        isExternalMouseDragging = false
+        pendingDragMouseAX = nil
+        dragStepScheduled = false
         snapManager.suppressGlobalDragMonitor = false
+        hideAllBackgroundMasks()
     }
 
     nonisolated private func handleMouseTapCallback(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -493,7 +704,6 @@ public final class WindowChromeBarController: NSObject {
             let rectInWin = view.convert(view.bounds, to: nil)
             return panel.convertToScreen(rectInWin)
         }
-        // Fallback: middle strip between left menus and right 126pt caption buttons
         let f = panel.frame
         let leftInset: CGFloat = min(220, f.width * 0.35)
         let rightInset: CGFloat = 126
@@ -514,6 +724,8 @@ public final class WindowChromeBarController: NSObject {
             && (trafficLightMaskPanel?.frame.contains(cocoaPt) == true)
 
         guard inTitleDrag || inTrafficMask else {
+            isExternalMouseDragging = true
+            startFastDragSyncTimer()
             return false
         }
 
@@ -524,20 +736,27 @@ public final class WindowChromeBarController: NSObject {
             return true
         }
 
-        let liveWin = AccessibilityBridge.windowInfo(for: win.element, pid: win.pid) ?? win
-        let screen = AccessibilityBridge.screenContaining(axFrame: liveWin.axFrame) ?? NSScreen.main ?? NSScreen.screens.first
+        let fastFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID) ?? win.axFrame
+        let screen = AccessibilityBridge.screenContaining(axFrame: fastFrame) ?? NSScreen.main ?? NSScreen.screens.first
         let barH = CGFloat(model.config.windowBarHeight)
         let screenTopAX = screen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
 
-        currentWindow = liveWin
-        dragTargetWindow = liveWin
+        dragTargetWindow = AXWindowInfo(
+            pid: win.pid,
+            windowID: win.windowID,
+            title: win.title,
+            axFrame: fastFrame,
+            isMinimized: win.isMinimized,
+            isFullScreen: win.isFullScreen,
+            element: win.element
+        )
         dragStartMouseAX = locationAX
-        dragStartWindowFrameAX = liveWin.axFrame
-        dragStartPanelFrameCocoa = panel.frame
-        dragStartMaskOriginCocoa = (trafficLightMaskPanel?.isVisible == true) ? trafficLightMaskPanel?.frame.origin : nil
-        dragWasMaximized = screen.map { snapManager.isWindowMaximized(liveWin, on: $0) } ?? false
+        dragStartWindowFrameAX = fastFrame
+        dragWasMaximized = screen.map { snapManager.isWindowMaximized(dragTargetWindow!, on: $0) } ?? false
         dragDidUnmaximize = false
         dragMinSafeAXTop = screenTopAX + barH
+        pendingDragMouseAX = nil
+        dragStepScheduled = false
         isDraggingTargetWindow = true
         snapManager.suppressGlobalDragMonitor = true
         snapPanel?.orderOut(nil)
@@ -545,8 +764,67 @@ public final class WindowChromeBarController: NSObject {
     }
 
     private func handleTapMouseDragged(locationAX: CGPoint) -> Bool {
-        guard isDraggingTargetWindow, let win = dragTargetWindow, let panel else {
+        if isDraggingTargetWindow {
+            pendingDragMouseAX = locationAX
+            if !dragStepScheduled {
+                dragStepScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.performCoalescedDragStep()
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    private func handleTapMouseUp() -> Bool {
+        if isExternalMouseDragging {
+            isExternalMouseDragging = false
+            fastDragSyncTimer?.invalidate()
+            fastDragSyncTimer = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.syncActiveWindow()
+            }
+        }
+
+        guard isDraggingTargetWindow else {
             return false
+        }
+
+        let win = dragTargetWindow ?? currentWindow
+        let bid = currentBundleID.isEmpty ? nil : currentBundleID
+        isDraggingTargetWindow = false
+        pendingDragMouseAX = nil
+        dragStepScheduled = false
+        dragTargetWindow = nil
+        snapManager.suppressGlobalDragMonitor = false
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            _ = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
+            self.syncActiveWindow()
+        }
+        return true
+    }
+
+    private func startFastDragSyncTimer() {
+        fastDragSyncTimer?.invalidate()
+        fastDragSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isExternalMouseDragging else { return }
+                self.syncOverlayPositionsFromWindowServer()
+            }
+        }
+    }
+
+    private func performCoalescedDragStep() {
+        dragStepScheduled = false
+        guard isDraggingTargetWindow,
+              let locationAX = pendingDragMouseAX,
+              let win = dragTargetWindow,
+              let panel
+        else {
+            return
         }
 
         var dx = locationAX.x - dragStartMouseAX.x
@@ -569,23 +847,6 @@ public final class WindowChromeBarController: NSObject {
                 dragStartWindowFrameAX = restored
                 dragStartMouseAX = locationAX
                 dragDidUnmaximize = true
-
-                let primaryH = AccessibilityBridge.primaryScreenHeight()
-                let barH = CGFloat(model.config.windowBarHeight)
-                let newBarFrame = CGRect(
-                    x: restored.minX,
-                    y: primaryH - restored.minY,
-                    width: restored.width,
-                    height: barH
-                )
-                panel.setFrame(newBarFrame, display: true)
-                dragStartPanelFrameCocoa = newBarFrame
-                if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible,
-                   let axMask = AccessibilityBridge.trafficLightUnionAXRect(for: win.element) {
-                    let cocoaMask = WindowChromeGeometry.axRectToCocoa(axMask, primaryScreenHeight: primaryH)
-                    maskPanel.setFrame(cocoaMask, display: true)
-                    dragStartMaskOriginCocoa = cocoaMask.origin
-                }
                 dx = 0
                 dy = 0
             }
@@ -593,17 +854,20 @@ public final class WindowChromeBarController: NSObject {
 
         let targetX = (dragStartWindowFrameAX.origin.x + dx).rounded()
         let targetY = max(dragMinSafeAXTop, dragStartWindowFrameAX.origin.y + dy).rounded()
-        let appliedDX = targetX - dragStartWindowFrameAX.origin.x
-        let appliedDY = targetY - dragStartWindowFrameAX.origin.y
-
         let newOriginAX = CGPoint(x: targetX, y: targetY)
         AccessibilityBridge.setPosition(win.element, origin: newOriginAX)
+
+        // Read REAL WindowServer bounds so bar & mask can NEVER detach from the actual window
+        let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
+            ?? CGRect(origin: newOriginAX, size: dragStartWindowFrameAX.size)
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let screen = AccessibilityBridge.screenContaining(axFrame: liveBounds) ?? NSScreen.main ?? NSScreen.screens.first
 
         let updatedWin = AXWindowInfo(
             pid: win.pid,
             windowID: win.windowID,
             title: win.title,
-            axFrame: CGRect(origin: newOriginAX, size: dragStartWindowFrameAX.size),
+            axFrame: liveBounds,
             isMinimized: win.isMinimized,
             isFullScreen: win.isFullScreen,
             element: win.element
@@ -611,40 +875,33 @@ public final class WindowChromeBarController: NSObject {
         dragTargetWindow = updatedWin
         currentWindow = updatedWin
 
-        panel.setFrameOrigin(NSPoint(
-            x: dragStartPanelFrameCocoa.origin.x + appliedDX,
-            y: dragStartPanelFrameCocoa.origin.y - appliedDY
-        ))
-        if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible, let startMaskOrigin = dragStartMaskOriginCocoa {
-            maskPanel.setFrameOrigin(NSPoint(
-                x: startMaskOrigin.x + appliedDX,
-                y: startMaskOrigin.y - appliedDY
-            ))
+        if let screen,
+           let barRect = WindowChromeGeometry.dockedBarFrame(
+            forAXWindowFrame: liveBounds,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen.frame,
+            visibleFrameCocoa: screen.visibleFrame,
+            barHeight: CGFloat(model.config.windowBarHeight),
+            taskbarHeight: CGFloat(model.config.taskbarHeight)
+           ) {
+            panel.setFrame(barRect, display: true)
+            let barAXRect = WindowChromeGeometry.cocoaRectToAX(barRect, primaryScreenHeight: primaryH)
+            if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible,
+               let rel = cachedMaskRelativeOffsets[win.windowID] {
+                let axMask = CGRect(
+                    x: liveBounds.minX + rel.minX,
+                    y: liveBounds.minY + rel.minY,
+                    width: rel.width,
+                    height: rel.height
+                )
+                let cocoaMask = WindowChromeGeometry.axRectToCocoa(axMask, primaryScreenHeight: primaryH)
+                maskPanel.setFrame(cocoaMask, display: true)
+            }
+            syncBackgroundMasks(frontWindowID: win.windowID, frontBarAXRect: barAXRect, primaryScreenHeight: primaryH)
         }
 
-        let primaryH = AccessibilityBridge.primaryScreenHeight()
         let cocoaMouse = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
         snapManager.updateDragPreview(mouseLocationCocoa: cocoaMouse)
-        return true
-    }
-
-    private func handleTapMouseUp() -> Bool {
-        guard isDraggingTargetWindow else {
-            return false
-        }
-        let win = dragTargetWindow ?? currentWindow
-        let bid = currentBundleID.isEmpty ? nil : currentBundleID
-        isDraggingTargetWindow = false
-        dragTargetWindow = nil
-        dragStartMaskOriginCocoa = nil
-        snapManager.suppressGlobalDragMonitor = false
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            _ = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
-            self.syncActiveWindow()
-        }
-        return true
     }
 
     private func dragCurrentWindow(deltaX: CGFloat, deltaY: CGFloat) {
@@ -1099,6 +1356,7 @@ private final class TrafficLightMaskNSView: NSView {
     var onDragDelta: ((CGFloat, CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
     var onDoubleClick: (() -> Void)?
+    var onSimpleClick: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1114,28 +1372,14 @@ private final class TrafficLightMaskNSView: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
+        if let onSimpleClick {
+            onSimpleClick()
+            return
+        }
         if event.clickCount == 2 {
             onDoubleClick?()
             return
         }
-        var lastPoint = NSEvent.mouseLocation
-        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            switch next.type {
-            case .leftMouseDragged:
-                let current = NSEvent.mouseLocation
-                let dx = current.x - lastPoint.x
-                let dy = current.y - lastPoint.y
-                lastPoint = current
-                if abs(dx) > 0.1 || abs(dy) > 0.1 {
-                    onDragDelta?(dx, dy)
-                }
-            case .leftMouseUp:
-                onDragEnded?()
-                return
-            default:
-                break
-            }
-        }
-        onDragEnded?()
+        super.mouseDown(with: event)
     }
 }

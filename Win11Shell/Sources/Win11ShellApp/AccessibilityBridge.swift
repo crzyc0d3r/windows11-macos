@@ -39,6 +39,13 @@ public struct TrayExtraItem: @unchecked Sendable, Identifiable {
     public let element: AXUIElement
 }
 
+public struct OnScreenWindowSnapshot: Sendable {
+    public let windowID: CGWindowID
+    public let pid: pid_t
+    public let ownerName: String
+    public let axBounds: CGRect
+}
+
 @MainActor
 public enum AccessibilityBridge {
     public static func hasAccessibilityPermission(prompt: Bool = false) -> Bool {
@@ -352,6 +359,52 @@ public enum AccessibilityBridge {
             }
         }
         return extras
+    }
+
+    // MARK: - Fast WindowServer Bounds & Z-Order Inspection
+
+    public static func onScreenNormalWindows() -> [OnScreenWindowSnapshot] {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return []
+        }
+
+        var results: [OnScreenWindowSnapshot] = []
+        results.reserveCapacity(list.count)
+        for entry in list {
+            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0,
+                  let alpha = entry[kCGWindowAlpha as String] as? Double, alpha > 0.05,
+                  let widNum = entry[kCGWindowNumber as String] as? UInt32,
+                  let pidNum = entry[kCGWindowOwnerPID as String] as? Int32,
+                  let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
+                  rect.width >= 200,
+                  rect.height >= 100
+            else {
+                continue
+            }
+            let owner = (entry[kCGWindowOwnerName as String] as? String) ?? ""
+            results.append(OnScreenWindowSnapshot(
+                windowID: CGWindowID(widNum),
+                pid: pid_t(pidNum),
+                ownerName: owner,
+                axBounds: rect
+            ))
+        }
+        return results
+    }
+
+    public static func liveWindowBounds(windowID: CGWindowID) -> CGRect? {
+        guard windowID != 0,
+              let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
+              let first = list.first,
+              let boundsDict = first[kCGWindowBounds as String] as? [String: Any]
+        else {
+            return nil
+        }
+        return CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
     }
 
     // MARK: - Traffic Light Inspection & Titlebar Color Sampling

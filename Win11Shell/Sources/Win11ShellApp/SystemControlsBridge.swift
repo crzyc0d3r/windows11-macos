@@ -38,6 +38,7 @@ public final class SystemControlsBridge {
     public var hasAccessibilityPermission: Bool = false
     public var hasInputMonitoringPermission: Bool = false
     public var hasScreenRecordingPermission: Bool = false
+    public var eventTapActive: Bool = false
     public var battery = BatteryStatus(percentage: 100, isCharging: false, isPluggedIn: true, present: false)
     public var stats = SystemStats(cpuPercent: 0, memoryUsedGB: 0, memoryTotalGB: 36)
 
@@ -89,7 +90,7 @@ public final class SystemControlsBridge {
 
     public func refreshPermissions() {
         hasAccessibilityPermission = AccessibilityBridge.hasAccessibilityPermission(prompt: false)
-        hasInputMonitoringPermission = AccessibilityBridge.hasInputMonitoringPermission()
+        hasInputMonitoringPermission = eventTapActive || AccessibilityBridge.hasInputMonitoringPermission()
         hasScreenRecordingPermission = AccessibilityBridge.hasScreenRecordingPermission()
     }
 
