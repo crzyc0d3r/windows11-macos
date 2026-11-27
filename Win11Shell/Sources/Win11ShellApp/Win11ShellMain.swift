@@ -178,6 +178,9 @@ final class ShellAppDelegate: NSObject, NSApplicationDelegate {
             _ = CGRequestListenEventAccess()
         }
         let screenGranted = AccessibilityBridge.hasScreenRecordingPermission()
+        if !screenGranted {
+            _ = CGRequestScreenCaptureAccess()
+        }
         ShellLogger.log("Win11Shell starting (AX=\(axGranted), InputMonitoring=\(inputGranted), ScreenRecording=\(screenGranted))")
         coordinator = ShellCoordinator()
     }

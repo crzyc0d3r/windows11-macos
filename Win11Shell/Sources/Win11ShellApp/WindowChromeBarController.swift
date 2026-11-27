@@ -95,7 +95,8 @@ public final class WindowChromeBarController: NSObject {
         syncTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.hiddenDragAppPID != nil && !self.isFinishingDragDrop && (NSEvent.pressedMouseButtons & 1) == 0 {
+                let physicalLeftDown = CGEventSource.buttonState(.hidSystemState, button: .left)
+                if self.hiddenDragAppPID != nil && !self.isFinishingDragDrop && !physicalLeftDown {
                     self.dragGhostPanel?.orderOut(nil)
                     self.isDraggingTargetWindow = false
                     self.dragDidStartVisualGhost = false
@@ -271,7 +272,10 @@ public final class WindowChromeBarController: NSObject {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         var effectiveWin = win
         var effectiveScreen = screen
-        if !isDraggingTargetWindow && !isExternalMouseDragging && NSEvent.pressedMouseButtons == 0 {
+        if !isDraggingTargetWindow
+            && !isExternalMouseDragging
+            && !CGEventSource.buttonState(.hidSystemState, button: .left)
+            && NSEvent.pressedMouseButtons == 0 {
             if WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
                 axFrame: win.axFrame,
                 screenFrameCocoa: screen.frame,
@@ -1381,7 +1385,7 @@ public final class WindowChromeBarController: NSObject {
             }
             if let win {
                 AccessibilityBridge.focusWindow(win)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.015) {
                     guard !didSnap else { return }
                     let liveFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
                         ?? AccessibilityBridge.windowInfo(for: win.element, pid: win.pid)?.axFrame
@@ -1397,14 +1401,14 @@ public final class WindowChromeBarController: NSObject {
                 }
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
                 guard let self else { return }
                 self.isDraggingTargetWindow = false
                 self.isFinishingDragDrop = false
                 self.syncActiveWindow()
                 self.dragGhostPanel?.orderOut(nil)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
                 self?.syncActiveWindow()
             }
         }
