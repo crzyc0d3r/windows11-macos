@@ -69,14 +69,20 @@ open build/FileExplorer.app
 
 ## Set as Default macOS File Viewer (`NSFileViewer`)
 
-After moving `build/FileExplorer.app` into `/Applications` (or keeping it registered with LaunchServices):
+Use the included `sudo` helper scripts to install/enable File Explorer as your default folder viewer (`up.sh`) or cleanly restore macOS Finder (`down.sh`):
+
+```bash
+# Install to /Applications, set NSFileViewer, restart Finder, and launch File Explorer
+sudo ./scripts/up.sh          # pass --rebuild to force rebuilding build/FileExplorer.app
+
+# Quit File Explorer, restore Finder defaults, remove /Applications/FileExplorer.app, and relaunch Finder
+sudo ./scripts/down.sh        # pass --keep-app to leave /Applications/FileExplorer.app installed
+```
+
+Or manage the `NSFileViewer` default manually after copying `build/FileExplorer.app` to `/Applications`:
 
 ```bash
 defaults write -g NSFileViewer -string com.hackedple.fileexplorer && killall Finder
-```
-
-To revert back to Finder:
-
-```bash
+# Revert:
 defaults delete -g NSFileViewer && killall Finder
 ```
