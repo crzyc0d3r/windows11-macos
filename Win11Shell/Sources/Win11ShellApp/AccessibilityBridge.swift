@@ -448,7 +448,7 @@ public enum AccessibilityBridge {
         }
 
         var current: AXUIElement? = startEl
-        for _ in 0..<4 {
+        for _ in 0..<6 {
             guard let el = current else { break }
             AXUIElementSetMessagingTimeout(el, 0.03)
             let role = stringAttribute(el, kAXRoleAttribute)

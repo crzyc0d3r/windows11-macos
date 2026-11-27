@@ -380,9 +380,9 @@ public enum WindowChromeGeometry {
     /// Estimates the height of a window's native macOS titlebar strip from its traffic-light button rect.
     public static func estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect?) -> CGFloat {
         if let rel = trafficLightRelativeRect, rel.maxY > 0 {
-            return max(36, min(52, rel.maxY + 10))
+            return max(44, min(60, rel.maxY + 20))
         }
-        return 38
+        return 52
     }
 
     /// Returns `true` when `axPoint` lies inside the window's native top titlebar band,
@@ -390,8 +390,8 @@ public enum WindowChromeGeometry {
     public static func isInNativeTitlebarBand(
         axPoint: CGPoint,
         windowAXFrame: CGRect,
-        titlebarHeight: CGFloat = 38,
-        resizeBorder: CGFloat = 5
+        titlebarHeight: CGFloat = 52,
+        resizeBorder: CGFloat = 4
     ) -> Bool {
         guard windowAXFrame.width >= 100, windowAXFrame.height >= 60 else {
             return false

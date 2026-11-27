@@ -70,6 +70,10 @@ public final class NonActivatingFloatingPanel: NSPanel {
     public var allowsNotchAreaPlacement: Bool = false
     public override var canBecomeKey: Bool { false }
     public override var canBecomeMain: Bool { false }
+    public override var hidesOnDeactivate: Bool {
+        get { false }
+        set {}
+    }
 
     public override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         allowsNotchAreaPlacement ? frameRect : super.constrainFrameRect(frameRect, to: screen)

@@ -235,28 +235,30 @@ struct Win11ShellCoreTests {
         #expect(queryMatches.map(\.name) == ["File Explorer", "My Files"])
     }
 
-    @Test("Native titlebar band detection preserves resize borders and excludes client content")
+    @Test("Native titlebar band detection preserves 4pt resize borders, covers unified 52pt toolbars, and excludes client content")
     func nativeTitlebarBandDetection() {
         let winFrame = CGRect(x: 100, y: 120, width: 800, height: 600)
 
-        // Resize borders (outer 5pt top/left/right) must pass through
+        // Resize borders (outer 4pt top/left/right) must pass through
         #expect(!WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 400, y: 122), windowAXFrame: winFrame))
         #expect(!WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 102, y: 138), windowAXFrame: winFrame))
         #expect(!WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 897, y: 138), windowAXFrame: winFrame))
 
-        // Interior native titlebar band returns true
+        // Interior native titlebar band (including ~52pt unified Tahoe toolbar) returns true
         #expect(WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 400, y: 138), windowAXFrame: winFrame))
         #expect(WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 120, y: 138), windowAXFrame: winFrame))
+        #expect(WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 400, y: 170), windowAXFrame: winFrame))
 
-        // Below titlebar (client content) and outside window return false
-        #expect(!WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 400, y: 165), windowAXFrame: winFrame))
+        // Below unified titlebar (client content) and outside window return false
+        #expect(!WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 400, y: 185), windowAXFrame: winFrame))
         #expect(!WindowChromeGeometry.isInNativeTitlebarBand(axPoint: CGPoint(x: 50, y: 138), windowAXFrame: winFrame))
 
-        // Estimated height from traffic lights
-        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: nil) == 38)
-        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 8, width: 62, height: 22)) == 40)
-        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 4, width: 60, height: 14)) == 36)
-        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 20, width: 60, height: 30)) == 52)
+        // Estimated height from traffic lights (52pt default for unified toolbars when unknown)
+        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: nil) == 52)
+        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 8, width: 62, height: 22)) == 50)
+        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 4, width: 60, height: 14)) == 44)
+        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 16, width: 62, height: 22)) == 58)
+        #expect(WindowChromeGeometry.estimatedNativeTitlebarHeight(trafficLightRelativeRect: CGRect(x: 8, y: 20, width: 60, height: 30)) == 60)
     }
 
     @Test("Titlebar Accessibility element classification distinguishes traffic lights, controls, and drag surfaces")
@@ -268,9 +270,18 @@ struct Win11ShellCoreTests {
             )
         }
 
-        for role in ["AXButton", "AXPopUpButton", "AXRadioButton", "AXTab", "AXSearchField", "AXTextField"] {
+        for role in [
+            "AXButton", "AXRadioButton", "AXCheckBox", "AXPopUpButton", "AXMenuButton",
+            "AXTextField", "AXSearchField", "AXComboBox", "AXTab", "AXLink",
+            "AXDisclosureTriangle", "AXMenuItem", "AXMenuBarItem", "AXSegmentedControl",
+            "AXSlider", "AXIncrementor", "AXColorWell"
+        ] {
             #expect(
                 WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXPress"])
+                    == .interactiveControl
+            )
+            #expect(
+                WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: [])
                     == .interactiveControl
             )
         }
@@ -282,7 +293,7 @@ struct Win11ShellCoreTests {
         )
 
         // Bare titlebar / web container / text drag surfaces
-        for role in ["AXGroup", "AXWebArea", "AXWindow", "AXToolbar", "AXStaticText"] {
+        for role in ["AXGroup", "AXWebArea", "AXWindow", "AXToolbar", "AXTabGroup", "AXStaticText"] {
             #expect(
                 WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXShowMenu"])
                     == .dragSurface
@@ -293,9 +304,17 @@ struct Win11ShellCoreTests {
             )
         }
 
-        // Even with AXPress on top-level container roles, keep dragSurface
+        // Even with AXPress on top-level container roles, keep dragSurface (fail-closed)
+        for role in ["AXWindow", "AXToolbar", "AXWebArea", "AXTabGroup", "AXScrollArea", "AXMenuBar"] {
+            #expect(
+                WindowChromeGeometry.classifyTitlebarElement(role: role, subrole: nil, actions: ["AXPress"])
+                    == .dragSurface
+            )
+        }
+
+        // Nil role and nil subrole without actions also classifies as dragSurface (fail-closed)
         #expect(
-            WindowChromeGeometry.classifyTitlebarElement(role: "AXWebArea", subrole: nil, actions: ["AXPress"])
+            WindowChromeGeometry.classifyTitlebarElement(role: nil, subrole: nil, actions: [])
                 == .dragSurface
         )
     }
