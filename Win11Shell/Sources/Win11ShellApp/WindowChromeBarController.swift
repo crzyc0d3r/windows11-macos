@@ -5,6 +5,70 @@ import QuartzCore
 import SwiftUI
 import Win11ShellCore
 
+private enum ChromeBarAppearance {
+    static let fillColor = Color(red: 0.115, green: 0.115, blue: 0.132)
+    static let notchFillColor = Color.black
+    static let outerBorderColor = Color.white.opacity(0.15)
+    static let bottomDividerColor = Color.white.opacity(0.10)
+    static let menuForeground = Color.white.opacity(0.90)
+    static let titleForeground = Color.white.opacity(0.76)
+    static let captionForeground = Color.white.opacity(0.86)
+    static let hoverFill = Color.white.opacity(0.12)
+    static let closeHoverFill = Color(red: 0.77, green: 0.17, blue: 0.11)
+    static let floatingTopCornerRadius: CGFloat = 12
+    static let windowInnerCornerRadius: CGFloat = 15
+    static let cornerSkirtHeight: CGFloat = 20
+}
+
+private struct FloatingChromeCapShape: Shape {
+    let barHeight: CGFloat
+    let topCornerRadius: CGFloat
+    let innerCornerRadius: CGFloat
+    let skirtHeight: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let outer = UnevenRoundedRectangle(
+            topLeadingRadius: topCornerRadius,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: topCornerRadius,
+            style: .continuous
+        ).path(in: rect)
+
+        guard skirtHeight > 0.5,
+              innerCornerRadius > 0.5,
+              rect.height > barHeight + 0.5
+        else {
+            return outer
+        }
+
+        let cutoutRect = CGRect(
+            x: rect.minX,
+            y: rect.minY + barHeight,
+            width: rect.width,
+            height: max(rect.height - barHeight + innerCornerRadius * 2, innerCornerRadius * 3)
+        )
+        let cutout = RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous).path(in: cutoutRect)
+        return outer.subtracting(cutout)
+    }
+}
+
+private final class ChromeBarHostingView<Content: View>: NSHostingView<Content> {
+    var activeTopBarHeight: CGFloat = 28
+    var cornerSkirtHeight: CGFloat = 0
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if cornerSkirtHeight > 0.5 {
+            if (isFlipped && local.y > activeTopBarHeight)
+                || (!isFlipped && local.y < bounds.height - activeTopBarHeight) {
+                return nil
+            }
+        }
+        return super.hitTest(point)
+    }
+}
+
 @MainActor
 @Observable
 public final class WindowChromeBarState {
@@ -14,6 +78,7 @@ public final class WindowChromeBarState {
     public var menuItems: [MirroredMenuItem] = []
     public var isMaximized: Bool = false
     public var barHeight: CGFloat = 28
+    public var cornerSkirtHeight: CGFloat = 0
     public var isNotchDocked: Bool = false
     public var leftNotchWidth: CGFloat = 0
     public var notchWidth: CGFloat = 0
@@ -28,6 +93,7 @@ private final class DragGhostState {
     var appIcon: NSImage?
     var title: String = ""
     var menuTitles: [String] = []
+    var hasOverflowMenus: Bool = false
     var barHeight: CGFloat = 28
     var snapshot: NSImage?
     var snapshotOriginalSize: CGSize = .zero
@@ -42,6 +108,8 @@ public final class WindowChromeBarController: NSObject {
     private let state = WindowChromeBarState()
     private let dragGhostState = DragGhostState()
     private var panel: NonActivatingFloatingPanel?
+    private var barHostingView: ChromeBarHostingView<WindowChromeBarView>?
+    private var logicalBarFrameCocoa: CGRect = .zero
     private var snapPanel: NonActivatingFloatingPanel?
     private var dragGhostPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskPanel: NonActivatingFloatingPanel?
@@ -117,13 +185,14 @@ public final class WindowChromeBarController: NSObject {
             defer: false
         )
         bar.allowsNotchAreaPlacement = true
+        bar.appearance = NSAppearance(named: .darkAqua)
         bar.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         bar.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         bar.backgroundColor = .clear
         bar.isOpaque = false
         bar.hasShadow = false
 
-        let hosting = NSHostingView(rootView: WindowChromeBarView(
+        let hosting = ChromeBarHostingView(rootView: WindowChromeBarView(
             state: state,
             onMenuClick: { [weak self] item, sourceView in
                 self?.openMirroredMenu(item: item, anchorView: sourceView)
@@ -164,6 +233,7 @@ public final class WindowChromeBarController: NSObject {
                 }
             }
         ))
+        barHostingView = hosting
         bar.contentView = hosting
         panel = bar
     }
@@ -329,6 +399,13 @@ public final class WindowChromeBarController: NSObject {
             return
         }
         let barRect = layout.frameCocoa
+        let windowCocoa = WindowChromeGeometry.axRectToCocoa(effectiveWin.axFrame, primaryScreenHeight: primaryH)
+        let (renderedBarRect, effectiveSkirt) = WindowChromeGeometry.renderedBarPanelFrame(
+            for: layout,
+            windowCocoaFrame: windowCocoa,
+            skirtHeight: ChromeBarAppearance.cornerSkirtHeight
+        )
+        logicalBarFrameCocoa = barRect
 
         let pid = front.processIdentifier
         currentWindow = effectiveWin
@@ -337,7 +414,8 @@ public final class WindowChromeBarController: NSObject {
         state.appIcon = AppIconCache.icon(forBundleID: bundleID, url: front.bundleURL, size: 16)
         state.windowTitle = effectiveWin.title.isEmpty ? state.appName : effectiveWin.title
         state.isMaximized = snapManager.isWindowMaximized(effectiveWin, on: effectiveScreen)
-        state.barHeight = layout.frameCocoa.height
+        state.barHeight = barRect.height
+        state.cornerSkirtHeight = effectiveSkirt
         state.isNotchDocked = layout.isNotchDocked
         state.leftNotchWidth = layout.leftNotchWidth
         state.notchWidth = layout.notchWidth
@@ -358,8 +436,10 @@ public final class WindowChromeBarController: NSObject {
         }
 
         if let panel {
+            barHostingView?.activeTopBarHeight = barRect.height
+            barHostingView?.cornerSkirtHeight = effectiveSkirt
             updatePanelLevel(isNotchDocked: layout.isNotchDocked)
-            setPanelFrameFast(panel, to: barRect)
+            setPanelFrameFast(panel, to: renderedBarRect)
             if !panel.isVisible {
                 panel.orderFrontRegardless()
             }
@@ -377,6 +457,7 @@ public final class WindowChromeBarController: NSObject {
 
     private func hideBar() {
         currentWindow = nil
+        logicalBarFrameCocoa = .zero
         panel?.orderOut(nil)
         snapPanel?.orderOut(nil)
         dragGhostPanel?.orderOut(nil)
@@ -448,16 +529,27 @@ public final class WindowChromeBarController: NSObject {
             return nil
         }
 
-        state.barHeight = layout.frameCocoa.height
+        let barRect = layout.frameCocoa
+        let windowCocoa = WindowChromeGeometry.axRectToCocoa(liveBounds, primaryScreenHeight: primaryScreenHeight)
+        let (renderedBarRect, effectiveSkirt) = WindowChromeGeometry.renderedBarPanelFrame(
+            for: layout,
+            windowCocoaFrame: windowCocoa,
+            skirtHeight: ChromeBarAppearance.cornerSkirtHeight
+        )
+        logicalBarFrameCocoa = barRect
+
+        state.barHeight = barRect.height
+        state.cornerSkirtHeight = effectiveSkirt
         state.isNotchDocked = layout.isNotchDocked
         state.leftNotchWidth = layout.leftNotchWidth
         state.notchWidth = layout.notchWidth
         state.rightNotchWidth = layout.rightNotchWidth
-        let barRect = layout.frameCocoa
 
         if let panel {
+            barHostingView?.activeTopBarHeight = barRect.height
+            barHostingView?.cornerSkirtHeight = effectiveSkirt
             updatePanelLevel(isNotchDocked: layout.isNotchDocked)
-            setPanelFrameFast(panel, to: barRect)
+            setPanelFrameFast(panel, to: renderedBarRect)
             if !panel.isVisible {
                 panel.orderFrontRegardless()
             }
@@ -1024,7 +1116,7 @@ public final class WindowChromeBarController: NSObject {
         if dragZoneNSView != nil {
             return false
         }
-        let f = panel.frame
+        let f = logicalBarFrameCocoa.width > 0 ? logicalBarFrameCocoa : panel.frame
         let leftInset: CGFloat = min(220, f.width * 0.35)
         let rightInset: CGFloat = 126
         guard f.width > leftInset + rightInset else { return false }
@@ -1048,6 +1140,7 @@ public final class WindowChromeBarController: NSObject {
             defer: false
         )
         p.allowsNotchAreaPlacement = true
+        p.appearance = NSAppearance(named: .darkAqua)
         p.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 3)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.backgroundColor = .clear
@@ -1075,8 +1168,9 @@ public final class WindowChromeBarController: NSObject {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
 
-        // 1. Clicks inside our chrome bar
-        if let panel, panel.isVisible, panel.frame.contains(cocoaPt) {
+        // 1. Clicks inside our chrome bar (logical bar frame, excluding bottom corner skirts)
+        let activeBarHitRect = logicalBarFrameCocoa.width > 0 ? logicalBarFrameCocoa : (panel?.frame ?? .zero)
+        if let panel, panel.isVisible, activeBarHitRect.contains(cocoaPt) {
             if let win = currentWindow,
                isPointInDragZone(cocoaPt) {
                 if clickCount == 2 {
@@ -1251,7 +1345,8 @@ public final class WindowChromeBarController: NSObject {
 
             dragGhostState.appIcon = state.appIcon
             dragGhostState.title = state.windowTitle
-            dragGhostState.menuTitles = Array(state.menuItems.prefix(6).map(\.title))
+            dragGhostState.menuTitles = Array(state.menuItems.prefix(7).map(\.title))
+            dragGhostState.hasOverflowMenus = state.menuItems.count > 7
             dragGhostState.barHeight = barH
 
             if let cached = cachedDragSnapshot,
@@ -1441,6 +1536,10 @@ public final class WindowChromeBarController: NSObject {
             element: win.element
         )
         currentWindow = updated
+        if logicalBarFrameCocoa.width > 0 {
+            logicalBarFrameCocoa.origin.x += deltaX
+            logicalBarFrameCocoa.origin.y += deltaY
+        }
         panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x + deltaX, y: panel.frame.origin.y + deltaY))
         if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible {
             maskPanel.setFrameOrigin(NSPoint(x: maskPanel.frame.origin.x + deltaX, y: maskPanel.frame.origin.y + deltaY))
@@ -1635,28 +1734,56 @@ private struct WindowChromeBarView: View {
 
     var body: some View {
         let barHeight = state.barHeight
-        Group {
-            if state.isNotchDocked {
-                HStack(spacing: 0) {
-                    HStack(spacing: 0) {
-                        menuStrip(visibleCount: 6)
-                        ChromeTitleDragArea(
-                            title: "",
-                            onViewReady: onLeftDragZoneReady,
-                            onDragDelta: onDragDelta,
-                            onDragEnded: onDragEnded,
-                            onDoubleClick: onDoubleClickTitle
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                    .frame(width: state.leftNotchWidth)
-                    .frame(maxHeight: .infinity)
+        let skirtHeight = state.isNotchDocked ? 0 : state.cornerSkirtHeight
+        let topRadius: CGFloat = (state.isNotchDocked || state.isMaximized) ? 0 : ChromeBarAppearance.floatingTopCornerRadius
+        let capShape = FloatingChromeCapShape(
+            barHeight: barHeight,
+            topCornerRadius: topRadius,
+            innerCornerRadius: ChromeBarAppearance.windowInnerCornerRadius,
+            skirtHeight: skirtHeight
+        )
 
-                    Color.black
-                        .frame(width: state.notchWidth)
+        VStack(spacing: 0) {
+            Group {
+                if state.isNotchDocked {
+                    HStack(spacing: 0) {
+                        HStack(spacing: 0) {
+                            menuStrip(visibleCount: 6)
+                            ChromeTitleDragArea(
+                                title: "",
+                                onViewReady: onLeftDragZoneReady,
+                                onDragDelta: onDragDelta,
+                                onDragEnded: onDragEnded,
+                                onDoubleClick: onDoubleClickTitle
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .frame(width: state.leftNotchWidth)
                         .frame(maxHeight: .infinity)
 
+                        Color.black
+                            .frame(width: state.notchWidth)
+                            .frame(maxHeight: .infinity)
+
+                        HStack(spacing: 0) {
+                            ChromeTitleDragArea(
+                                title: state.windowTitle,
+                                onViewReady: onDragZoneReady,
+                                onDragDelta: onDragDelta,
+                                onDragEnded: onDragEnded,
+                                onDoubleClick: onDoubleClickTitle
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            captionButtons(height: barHeight)
+                        }
+                        .frame(width: state.rightNotchWidth)
+                        .frame(maxHeight: .infinity)
+                    }
+                } else {
                     HStack(spacing: 0) {
+                        menuStrip(visibleCount: 7)
+
                         ChromeTitleDragArea(
                             title: state.windowTitle,
                             onViewReady: onDragZoneReady,
@@ -1668,43 +1795,53 @@ private struct WindowChromeBarView: View {
 
                         captionButtons(height: barHeight)
                     }
-                    .frame(width: state.rightNotchWidth)
-                    .frame(maxHeight: .infinity)
                 }
-            } else {
-                HStack(spacing: 0) {
-                    menuStrip(visibleCount: 7)
+            }
+            .frame(height: barHeight)
+            .onHover(perform: onHoverBar)
 
-                    ChromeTitleDragArea(
-                        title: state.windowTitle,
-                        onViewReady: onDragZoneReady,
-                        onDragDelta: onDragDelta,
-                        onDragEnded: onDragEnded,
-                        onDoubleClick: onDoubleClickTitle
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    captionButtons(height: barHeight)
-                }
+            if skirtHeight > 0 {
+                Color.clear
+                    .frame(height: skirtHeight)
+                    .allowsHitTesting(false)
             }
         }
-        .frame(height: barHeight)
-        .onHover(perform: onHoverBar)
-        .background(
-            Group {
-                if state.isNotchDocked {
-                    Color.black
-                } else {
-                    AcrylicBackground(material: .titlebar)
-                }
+        .background {
+            if state.isNotchDocked {
+                ChromeBarAppearance.notchFillColor
+                    .overlay(
+                        Rectangle()
+                            .frame(height: 0.5)
+                            .foregroundStyle(Color.white.opacity(0.14)),
+                        alignment: .bottom
+                    )
+            } else {
+                ChromeBarAppearance.fillColor
             }
-            .overlay(
+        }
+        .overlay(alignment: .top) {
+            if !state.isNotchDocked {
                 Rectangle()
                     .frame(height: 0.5)
-                    .foregroundStyle(Color.white.opacity(state.isNotchDocked ? 0.14 : 0.12)),
-                alignment: .bottom
-            )
-        )
+                    .foregroundStyle(ChromeBarAppearance.bottomDividerColor)
+                    .offset(y: barHeight - 0.5)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay {
+            if !state.isNotchDocked {
+                UnevenRoundedRectangle(
+                    topLeadingRadius: topRadius,
+                    bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0,
+                    topTrailingRadius: topRadius,
+                    style: .continuous
+                )
+                .strokeBorder(ChromeBarAppearance.outerBorderColor, lineWidth: 0.75)
+                .allowsHitTesting(false)
+            }
+        }
+        .clipShape(capShape)
     }
 
     @ViewBuilder
@@ -1737,11 +1874,16 @@ private struct WindowChromeBarView: View {
     @ViewBuilder
     private func captionButtons(height: CGFloat) -> some View {
         HStack(spacing: 0) {
-            CaptionButton(symbol: "minus", hoverColor: Color.primary.opacity(0.12), height: height, action: onMinimize)
+            CaptionButton(
+                symbol: "minus",
+                hoverColor: ChromeBarAppearance.hoverFill,
+                height: height,
+                action: onMinimize
+            )
 
             CaptionButton(
                 symbol: state.isMaximized ? "square.on.square" : "square",
-                hoverColor: Color.primary.opacity(0.12),
+                hoverColor: ChromeBarAppearance.hoverFill,
                 height: height,
                 action: onMaximize,
                 onHoverWithScreenRect: { hovering, rect in
@@ -1751,7 +1893,7 @@ private struct WindowChromeBarView: View {
 
             CaptionButton(
                 symbol: "xmark",
-                hoverColor: Color(red: 0.77, green: 0.17, blue: 0.11),
+                hoverColor: ChromeBarAppearance.closeHoverFill,
                 hoverForeground: .white,
                 height: height,
                 action: onClose
@@ -1764,48 +1906,16 @@ private struct DragGhostPreviewView: View {
     let state: DragGhostState
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                if let icon = state.appIcon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 15, height: 15)
-                        .padding(.leading, 8)
-                }
+        let barHeight = state.barHeight
+        let skirtHeight = ChromeBarAppearance.cornerSkirtHeight
+        let capShape = FloatingChromeCapShape(
+            barHeight: barHeight,
+            topCornerRadius: ChromeBarAppearance.floatingTopCornerRadius,
+            innerCornerRadius: ChromeBarAppearance.windowInnerCornerRadius,
+            skirtHeight: skirtHeight
+        )
 
-                ForEach(Array(state.menuTitles.enumerated()), id: \.offset) { _, menuTitle in
-                    Text(menuTitle)
-                        .font(.system(size: 11.5, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.86))
-                        .lineLimit(1)
-                        .padding(.horizontal, 6)
-                }
-
-                Spacer(minLength: 8)
-
-                Text(state.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.75))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                Spacer(minLength: 8)
-
-                HStack(spacing: 0) {
-                    ghostCaptionGlyph("minus")
-                    ghostCaptionGlyph("square")
-                    ghostCaptionGlyph("xmark")
-                }
-            }
-            .frame(height: state.barHeight)
-            .background(Color(red: 0.11, green: 0.11, blue: 0.13).opacity(0.96))
-            .overlay(
-                Rectangle()
-                    .frame(height: 0.5)
-                    .foregroundStyle(Color.white.opacity(0.16)),
-                alignment: .bottom
-            )
-
+        ZStack(alignment: .top) {
             Group {
                 if let snapshot = state.snapshot {
                     GeometryReader { geo in
@@ -1835,13 +1945,20 @@ private struct DragGhostPreviewView: View {
                         }
                     }
                 } else {
+                    let bodyShape = UnevenRoundedRectangle(
+                        topLeadingRadius: 0,
+                        bottomLeadingRadius: ChromeBarAppearance.windowInnerCornerRadius,
+                        bottomTrailingRadius: ChromeBarAppearance.windowInnerCornerRadius,
+                        topTrailingRadius: 0,
+                        style: .continuous
+                    )
                     ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        bodyShape
                             .fill(.ultraThinMaterial)
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        bodyShape
                             .fill(Color.black.opacity(0.24))
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.35), lineWidth: 1.5)
+                        bodyShape
+                            .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
 
                         HStack(spacing: 8) {
                             if let icon = state.appIcon {
@@ -1864,19 +1981,81 @@ private struct DragGhostPreviewView: View {
                     }
                 }
             }
+            .padding(.top, barHeight)
+
+            VStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    if let icon = state.appIcon {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .frame(width: 15, height: 15)
+                            .padding(.leading, 8)
+                    }
+
+                    ForEach(Array(state.menuTitles.enumerated()), id: \.offset) { _, menuTitle in
+                        Text(menuTitle)
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundStyle(ChromeBarAppearance.menuForeground)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                    }
+
+                    if state.hasOverflowMenus {
+                        Text("•••")
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundStyle(ChromeBarAppearance.menuForeground)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Text(state.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(ChromeBarAppearance.titleForeground)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 8)
+
+                    HStack(spacing: 0) {
+                        ghostCaptionGlyph("minus")
+                        ghostCaptionGlyph("square")
+                        ghostCaptionGlyph("xmark")
+                    }
+                }
+                .frame(height: barHeight)
+
+                Color.clear
+                    .frame(height: skirtHeight)
+            }
+            .background(ChromeBarAppearance.fillColor)
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .frame(height: 0.5)
+                    .foregroundStyle(ChromeBarAppearance.bottomDividerColor)
+                    .offset(y: barHeight - 0.5)
+            }
+            .overlay {
+                UnevenRoundedRectangle(
+                    topLeadingRadius: ChromeBarAppearance.floatingTopCornerRadius,
+                    bottomLeadingRadius: 0,
+                    bottomTrailingRadius: 0,
+                    topTrailingRadius: ChromeBarAppearance.floatingTopCornerRadius,
+                    style: .continuous
+                )
+                .strokeBorder(ChromeBarAppearance.outerBorderColor, lineWidth: 0.75)
+            }
+            .clipShape(capShape)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.45), radius: 18, x: 0, y: 10)
     }
 
     private func ghostCaptionGlyph(_ symbol: String) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(Color.white.opacity(0.65))
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(ChromeBarAppearance.captionForeground)
             .frame(width: 42, height: state.barHeight)
     }
 }
@@ -1895,13 +2074,13 @@ private struct MenuAnchorButton: View {
         } label: {
             Text(title)
                 .font(.system(size: 11.5, weight: .regular))
-                .foregroundStyle(.primary)
+                .foregroundStyle(ChromeBarAppearance.menuForeground)
                 .lineLimit(1)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(hovered ? Color.primary.opacity(0.12) : .clear)
+                        .fill(hovered ? ChromeBarAppearance.hoverFill : .clear)
                 )
         }
         .buttonStyle(.plain)
@@ -1927,7 +2106,7 @@ private struct AnchorViewFinder: NSViewRepresentable {
 private struct CaptionButton: View {
     let symbol: String
     let hoverColor: Color
-    var hoverForeground: Color = .primary
+    var hoverForeground: Color = .white
     var height: CGFloat = 28
     let action: () -> Void
     var onHoverWithScreenRect: ((Bool, NSRect) -> Void)?
@@ -1939,7 +2118,7 @@ private struct CaptionButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(hovered ? hoverForeground : .primary)
+                .foregroundStyle(hovered ? hoverForeground : ChromeBarAppearance.captionForeground)
                 .frame(width: 42, height: height)
                 .background(hovered ? hoverColor : .clear)
         }
@@ -1998,7 +2177,7 @@ private final class TitleDragNSView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        label.textColor = .secondaryLabelColor
+        label.textColor = NSColor.white.withAlphaComponent(0.76)
         label.lineBreakMode = .byTruncatingTail
         label.alignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false

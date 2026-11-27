@@ -115,6 +115,29 @@ public enum WindowChromeGeometry {
         )
     }
 
+    /// Expands a floating chrome bar panel downward by `skirtHeight` points when docked flush
+    /// atop a window so concave bottom corner skirts hug macOS's rounded upper window corners.
+    public static func renderedBarPanelFrame(
+        for layout: DockedBarLayout,
+        windowCocoaFrame: CGRect,
+        skirtHeight: CGFloat
+    ) -> (panelFrameCocoa: CGRect, effectiveSkirtHeight: CGFloat) {
+        if !layout.isNotchDocked,
+           skirtHeight > 0,
+           abs(layout.frameCocoa.minY - windowCocoaFrame.maxY) < 1.5,
+           windowCocoaFrame.height >= 60 {
+            let clampedSkirt = min(skirtHeight, max(0, windowCocoaFrame.height - 40))
+            let panelFrame = CGRect(
+                x: layout.frameCocoa.minX,
+                y: layout.frameCocoa.minY - clampedSkirt,
+                width: layout.frameCocoa.width,
+                height: layout.frameCocoa.height + clampedSkirt
+            )
+            return (panelFrame, clampedSkirt)
+        }
+        return (layout.frameCocoa, 0)
+    }
+
     /// Computes the Cocoa frame for the 28pt Window Chrome Bar docked flush above `axWindowFrame`.
     /// Returns `nil` when the window is too small or covers the full screen (fullscreen/kiosk).
     public static func dockedBarFrame(

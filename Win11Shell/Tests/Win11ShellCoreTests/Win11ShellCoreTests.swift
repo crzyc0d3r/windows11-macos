@@ -440,4 +440,86 @@ struct Win11ShellCoreTests {
         )
         #expect(normalizedNotched == maxNotchedAX)
     }
+
+    @Test("Rendered floating bar panel expands downward for corner skirts when flush above window")
+    func renderedBarPanelSkirtGeometry() {
+        let primaryH: CGFloat = 1169
+        let screen = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+        let visible = CGRect(x: 0, y: 0, width: 1800, height: 1131)
+
+        // Floating window: bar is flush atop window -> panel expands 20pt downward into window top corners
+        let floatingAX = CGRect(x: 200, y: 180, width: 1000, height: 600)
+        let floatingCocoa = WindowChromeGeometry.axRectToCocoa(floatingAX, primaryScreenHeight: primaryH)
+        let floatingLayout = WindowChromeGeometry.dockedBarLayout(
+            forAXWindowFrame: floatingAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            safeAreaTopInset: 38,
+            auxiliaryTopLeftWidth: 790,
+            auxiliaryTopRightWidth: 790,
+            barHeight: 28,
+            taskbarHeight: 48
+        )!
+        let floatingRendered = WindowChromeGeometry.renderedBarPanelFrame(
+            for: floatingLayout,
+            windowCocoaFrame: floatingCocoa,
+            skirtHeight: 20
+        )
+        #expect(floatingRendered.effectiveSkirtHeight == 20)
+        #expect(floatingRendered.panelFrameCocoa.maxY == floatingLayout.frameCocoa.maxY)
+        #expect(floatingRendered.panelFrameCocoa.minY == floatingLayout.frameCocoa.minY - 20)
+        #expect(floatingRendered.panelFrameCocoa.height == 48)
+
+        // Notch-docked window -> effectiveSkirtHeight == 0, frame unchanged
+        let maxNotchedAX = WindowChromeGeometry.maximizedAXFrame(
+            forScreenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        )
+        let maxCocoa = WindowChromeGeometry.axRectToCocoa(maxNotchedAX, primaryScreenHeight: primaryH)
+        let notchedLayout = WindowChromeGeometry.dockedBarLayout(
+            forAXWindowFrame: maxNotchedAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            safeAreaTopInset: 38,
+            auxiliaryTopLeftWidth: 790,
+            auxiliaryTopRightWidth: 790,
+            barHeight: 28,
+            taskbarHeight: 48
+        )!
+        let notchedRendered = WindowChromeGeometry.renderedBarPanelFrame(
+            for: notchedLayout,
+            windowCocoaFrame: maxCocoa,
+            skirtHeight: 20
+        )
+        #expect(notchedRendered.effectiveSkirtHeight == 0)
+        #expect(notchedRendered.panelFrameCocoa == notchedLayout.frameCocoa)
+
+        // Detached/clamped floating bar away from window top -> effectiveSkirtHeight == 0
+        let clippedTopAX = CGRect(x: 200, y: 10, width: 1000, height: 600)
+        let clippedTopCocoa = WindowChromeGeometry.axRectToCocoa(clippedTopAX, primaryScreenHeight: primaryH)
+        let detachedLayout = WindowChromeGeometry.dockedBarLayout(
+            forAXWindowFrame: clippedTopAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+            safeAreaTopInset: 0,
+            auxiliaryTopLeftWidth: 0,
+            auxiliaryTopRightWidth: 0,
+            barHeight: 28,
+            taskbarHeight: 48
+        )!
+        let detachedRendered = WindowChromeGeometry.renderedBarPanelFrame(
+            for: detachedLayout,
+            windowCocoaFrame: clippedTopCocoa,
+            skirtHeight: 20
+        )
+        #expect(detachedRendered.effectiveSkirtHeight == 0)
+        #expect(detachedRendered.panelFrameCocoa == detachedLayout.frameCocoa)
+    }
 }
