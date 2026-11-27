@@ -15,11 +15,19 @@ public final class CalendarFlyoutController {
     private let model: RunningAppsModel
     private let state = CalendarFlyoutState()
     private var panel: FocusableFloatingPanel?
-    private var outsideMonitor: Any?
+    private let dismissCoordinator = FlyoutDismissCoordinator()
     private var clockTimer: Timer?
+
+    public var isVisible: Bool { panel?.isVisible ?? false }
 
     public init(model: RunningAppsModel) {
         self.model = model
+    }
+
+    isolated deinit {
+        dismissCoordinator.removeAll()
+        clockTimer?.invalidate()
+        clockTimer = nil
     }
 
     public func toggle(on screen: NSScreen? = nil) {
@@ -42,6 +50,7 @@ public final class CalendarFlyoutController {
                 defer: false
             )
             p.level = .popUpMenu
+            p.hidesOnDeactivate = false
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
             p.backgroundColor = .clear
             p.isOpaque = false
@@ -53,11 +62,14 @@ public final class CalendarFlyoutController {
             panel = p
         }
 
-        let target = screen ?? NSScreen.main ?? NSScreen.screens.first
+        let mouseLocation = NSEvent.mouseLocation
+        let mouseScreen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
+        let target = screen ?? mouseScreen ?? NSScreen.main ?? NSScreen.screens.first
         if let target, let panel {
             let x = target.frame.maxX - panel.frame.width - 12
             let y = target.frame.minY + CGFloat(model.config.taskbarHeight) + 12
             panel.setFrameOrigin(NSPoint(x: x, y: y))
+            NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         }
 
@@ -67,29 +79,19 @@ public final class CalendarFlyoutController {
                 self?.state.currentDate = Date()
             }
         }
-        installOutsideMonitor()
+        if let panel {
+            dismissCoordinator.install(panel: panel) { [weak self] in
+                self?.dismiss()
+            }
+        }
     }
 
     public func dismiss() {
+        dismissCoordinator.removeAll()
         clockTimer?.invalidate()
         clockTimer = nil
+        panel?.makeFirstResponder(nil)
         panel?.orderOut(nil)
-        if let outsideMonitor {
-            NSEvent.removeMonitor(outsideMonitor)
-            self.outsideMonitor = nil
-        }
-    }
-
-    private func installOutsideMonitor() {
-        if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
-        outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let panel = self.panel, panel.isVisible else { return }
-                if !panel.frame.contains(NSEvent.mouseLocation) {
-                    self.dismiss()
-                }
-            }
-        }
     }
 }
 

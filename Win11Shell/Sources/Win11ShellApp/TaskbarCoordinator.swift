@@ -120,15 +120,20 @@ public final class TaskbarCoordinator {
                     self?.auxFlyouts.dismiss()
                     self?.startMenu.toggle(focusSearch: true, on: screen)
                 },
-                onTaskViewClick: {
+                onTaskViewClick: { [weak self] in
+                    self?.dismissAllFlyouts()
                     NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Mission Control.app"))
                 },
                 onWidgetsClick: { [weak self] in
                     self?.startMenu.dismiss()
+                    self?.quickSettings.dismiss()
+                    self?.calendarFlyout.dismiss()
                     self?.auxFlyouts.show(mode: .widgets, on: screen)
                 },
                 onTrayOverflowClick: { [weak self] in
                     self?.startMenu.dismiss()
+                    self?.quickSettings.dismiss()
+                    self?.calendarFlyout.dismiss()
                     self?.auxFlyouts.show(mode: .trayOverflow, on: screen)
                 },
                 onQuickSettingsClick: { [weak self] in
@@ -144,9 +149,13 @@ public final class TaskbarCoordinator {
                     self?.calendarFlyout.toggle(on: screen)
                 },
                 onShowDesktopClick: { [weak self] in
+                    self?.dismissAllFlyouts()
                     self?.showDesktop.toggleShowDesktop()
                 },
                 onTaskbarSettingsClick: { [weak self] in
+                    self?.startMenu.dismiss()
+                    self?.quickSettings.dismiss()
+                    self?.calendarFlyout.dismiss()
                     self?.auxFlyouts.show(mode: .taskbarSettings, on: screen)
                 },
                 onHoverAppIcon: { [weak self] item, hovering, rect in
@@ -154,6 +163,7 @@ public final class TaskbarCoordinator {
                 },
                 onAppClicked: { [weak self] item, isMiddle in
                     self?.hoverPreview.dismissImmediately()
+                    self?.dismissAllFlyouts()
                     self?.model.launchOrActivate(bundleID: item.bundleID, forceNewWindow: isMiddle)
                 }
             ))
@@ -161,6 +171,13 @@ public final class TaskbarCoordinator {
             panels[displayID] = p
         }
         ShellLogger.log("Taskbar panels created: \(panels.count) screen(s), height=\(Int(height))pt, level=statusBar")
+    }
+
+    private func dismissAllFlyouts() {
+        startMenu.dismiss()
+        quickSettings.dismiss()
+        calendarFlyout.dismiss()
+        auxFlyouts.dismiss()
     }
 
     private func startAutoHideAndFullscreenLoop() {
@@ -172,12 +189,19 @@ public final class TaskbarCoordinator {
     }
 
     private func updateVisibility() {
+        guard !model.isUserInteractingWithWindow else { return }
+
         let mouse = NSEvent.mouseLocation
         let height = CGFloat(model.config.taskbarHeight)
-        let front = NSWorkspace.shared.frontmostApplication
-        let frontWin = front.flatMap { AccessibilityBridge.focusedWindow(for: $0.processIdentifier) }
-        let frontScreen = frontWin.flatMap { AccessibilityBridge.screenContaining(axFrame: $0.axFrame) }
-        let frontIsFullScreen = frontWin?.isFullScreen ?? false
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let frontCocoaFrames: [CGRect]
+        if let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            frontCocoaFrames = AccessibilityBridge.onScreenNormalWindows()
+                .filter { $0.pid == frontPID }
+                .map { WindowChromeGeometry.axRectToCocoa($0.axBounds, primaryScreenHeight: primaryH) }
+        } else {
+            frontCocoaFrames = []
+        }
 
         for screen in NSScreen.screens {
             guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
@@ -187,7 +211,13 @@ public final class TaskbarCoordinator {
             }
 
             // Hide when frontmost window on this screen is in native macOS fullscreen
-            if frontIsFullScreen && frontScreen == screen {
+            let frontIsFullScreen = frontCocoaFrames.contains { rect in
+                abs(rect.minX - screen.frame.minX) <= 4
+                    && abs(rect.minY - screen.frame.minY) <= 4
+                    && abs(rect.width - screen.frame.width) <= 4
+                    && abs(rect.height - screen.frame.height) <= 4
+            }
+            if frontIsFullScreen {
                 panel.orderOut(nil)
                 notchBezelPanels[displayID]?.orderOut(nil)
                 continue
@@ -209,7 +239,7 @@ public final class TaskbarCoordinator {
             if model.config.taskbarAutoHide {
                 let nearBottom = screen.frame.contains(CGPoint(x: mouse.x, y: screen.frame.minY + 1))
                     && mouse.y <= screen.frame.minY + (isAutoHidden ? 4 : height + 8)
-                let flyoutOpen = startMenu.isVisible || quickSettings.isVisible
+                let flyoutOpen = startMenu.isVisible || quickSettings.isVisible || calendarFlyout.isVisible || auxFlyouts.isVisible
                 let shouldShow = nearBottom || flyoutOpen
                 isAutoHidden = !shouldShow
 

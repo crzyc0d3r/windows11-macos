@@ -267,6 +267,9 @@ final class ShellCoordinator {
         model.onLaunchSnippingTool = { [weak snippingTool] in
             snippingTool?.openEditorOrCapture()
         }
+        model.onWindowsMutated = { [weak windowBar] in
+            windowBar?.syncActiveWindow()
+        }
         quickSettings.onLaunchSnippingTool = { [weak snippingTool] in
             snippingTool?.openEditorOrCapture()
         }

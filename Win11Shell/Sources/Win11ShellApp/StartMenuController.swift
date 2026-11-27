@@ -27,7 +27,7 @@ public final class StartMenuController {
     private let system: SystemControlsBridge
     private let state = StartMenuState()
     private var panel: FocusableFloatingPanel?
-    private var outsideMonitor: Any?
+    private let dismissCoordinator = FlyoutDismissCoordinator()
     private var keyMonitor: Any?
 
     public var isVisible: Bool {
@@ -37,6 +37,11 @@ public final class StartMenuController {
     public init(model: RunningAppsModel, system: SystemControlsBridge) {
         self.model = model
         self.system = system
+    }
+
+    isolated deinit {
+        dismissCoordinator.removeAll()
+        removeKeyMonitor()
     }
 
     public func toggle(focusSearch: Bool = false, on screen: NSScreen? = nil) {
@@ -103,15 +108,26 @@ public final class StartMenuController {
             }
         }
 
-        installOutsideClickMonitor()
+        if let panel {
+            dismissCoordinator.install(
+                panel: panel,
+                shouldDismissOnResignKey: { [weak self] in
+                    !(self?.state.showPowerMenu ?? false)
+                },
+                onDismiss: { [weak self] in
+                    self?.dismiss()
+                }
+            )
+        }
         installKeyMonitor()
     }
 
     public func dismiss() {
+        dismissCoordinator.removeAll()
+        removeKeyMonitor()
+        state.showPowerMenu = false
         panel?.makeFirstResponder(nil)
         panel?.orderOut(nil)
-        removeOutsideClickMonitor()
-        removeKeyMonitor()
     }
 
     private func focusSearchField() {
@@ -135,26 +151,6 @@ public final class StartMenuController {
             }
         }
         return nil
-    }
-
-    private func installOutsideClickMonitor() {
-        removeOutsideClickMonitor()
-        outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let panel = self.panel, panel.isVisible else { return }
-                let loc = NSEvent.mouseLocation
-                if !panel.frame.contains(loc) {
-                    self.dismiss()
-                }
-            }
-        }
-    }
-
-    private func removeOutsideClickMonitor() {
-        if let outsideMonitor {
-            NSEvent.removeMonitor(outsideMonitor)
-            self.outsideMonitor = nil
-        }
     }
 
     private func installKeyMonitor() {

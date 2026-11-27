@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Foundation
 import Observation
 import Win11ShellCore
@@ -33,9 +34,12 @@ public final class RunningAppsModel {
     public var trayExtras: [TrayExtraItem] = []
     public var frontmostBundleID: String?
     public var frontmostPID: pid_t?
+    public var isUserInteractingWithWindow: Bool = false
     public var onLaunchSnippingTool: (@MainActor () -> Void)?
+    public var onWindowsMutated: (@MainActor () -> Void)?
 
     private let configStore: Win11ConfigStore
+    private var lastTrayExtrasRefreshAt: TimeInterval = 0
     public var config: Win11Config {
         didSet {
             try? configStore.save(config)
@@ -80,11 +84,16 @@ public final class RunningAppsModel {
         }
     }
 
-    public func refreshAll() {
+    public func refreshAll(forceTrayExtras: Bool = false) {
+        guard !isUserInteractingWithWindow else { return }
         refreshTaskbarItems()
-        trayExtras = AccessibilityBridge.readTrayExtras(
-            excludingBundleIDs: ["com.hackedple.win11shell", "com.apple.finder"]
-        )
+        let now = ProcessInfo.processInfo.systemUptime
+        if forceTrayExtras || lastTrayExtrasRefreshAt == 0 || (now - lastTrayExtrasRefreshAt) >= 10.0 {
+            lastTrayExtrasRefreshAt = now
+            trayExtras = AccessibilityBridge.readTrayExtras(
+                excludingBundleIDs: ["com.hackedple.win11shell", "com.apple.finder"]
+            )
+        }
     }
 
     public func refreshInstalledApps() {
@@ -135,6 +144,7 @@ public final class RunningAppsModel {
     }
 
     public func refreshTaskbarItems() {
+        guard !isUserInteractingWithWindow else { return }
         let front = NSWorkspace.shared.frontmostApplication
         frontmostBundleID = front?.bundleIdentifier
         frontmostPID = front?.processIdentifier
@@ -152,6 +162,11 @@ public final class RunningAppsModel {
             }
         }
 
+        var windowCountsByPID: [pid_t: Int] = [:]
+        for snap in AccessibilityBridge.onScreenNormalWindows() {
+            windowCountsByPID[snap.pid, default: 0] += 1
+        }
+
         var items: [TaskbarAppItem] = []
         var seen: Set<String> = []
 
@@ -166,7 +181,7 @@ public final class RunningAppsModel {
                 ?? installedApps.first(where: { $0.bundleID == bid })?.name
                 ?? url?.deletingPathExtension().lastPathComponent
                 ?? bid
-            let winCount = app.map { AccessibilityBridge.standardWindows(for: $0.processIdentifier).count } ?? 0
+            let winCount = app.map { windowCountsByPID[$0.processIdentifier] ?? 0 } ?? 0
 
             // Skip pinned apps that aren't installed or running (except FileExplorer)
             if app == nil && url == nil && bid != config.fileExplorerBundleID {
@@ -189,7 +204,7 @@ public final class RunningAppsModel {
         // 2. Remaining running apps
         for app in running {
             guard let bid = app.bundleIdentifier, seen.insert(bid).inserted else { continue }
-            let winCount = AccessibilityBridge.standardWindows(for: app.processIdentifier).count
+            let winCount = windowCountsByPID[app.processIdentifier] ?? 0
             items.append(TaskbarAppItem(
                 bundleID: bid,
                 name: app.localizedName ?? bid,
@@ -235,23 +250,55 @@ public final class RunningAppsModel {
                 return
             }
 
-            if running.bundleIdentifier == frontmostBundleID && !running.isHidden {
-                let windows = AccessibilityBridge.standardWindows(for: running.processIdentifier).filter { !$0.isMinimized }
-                if windows.isEmpty {
-                    running.hide()
-                } else {
-                    running.hide()
-                }
-            } else {
-                if running.isHidden {
-                    running.unhide()
-                }
-                let windows = AccessibilityBridge.standardWindows(for: running.processIdentifier)
-                if let firstMin = windows.first(where: { $0.isMinimized }), windows.allSatisfy(\.isMinimized) {
+            let pid = running.processIdentifier
+            let allWindows = AccessibilityBridge.standardWindows(for: pid)
+            let visibleWindows = allWindows.filter { !$0.isMinimized }
+            let minimizedWindows = allWindows.filter { $0.isMinimized }
+            let appEl = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(appEl, 0.25)
+
+            if running.isHidden {
+                running.unhide()
+                AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
+                AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                running.activate(options: [.activateAllWindows])
+                if visibleWindows.isEmpty, let firstMin = minimizedWindows.first {
+                    AccessibilityBridge.setMinimized(firstMin.element, minimized: false)
                     AccessibilityBridge.focusWindow(firstMin)
-                } else {
-                    running.activate(options: [.activateAllWindows])
+                    scheduleUnminimizeRetry(for: firstMin)
+                } else if let firstVis = visibleWindows.first {
+                    AccessibilityBridge.focusWindow(firstVis)
                 }
+                onWindowsMutated?()
+            } else if visibleWindows.isEmpty && !minimizedWindows.isEmpty {
+                let firstMin = minimizedWindows[0]
+                AccessibilityBridge.setMinimized(firstMin.element, minimized: false)
+                AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                running.activate(options: [.activateAllWindows])
+                AccessibilityBridge.focusWindow(firstMin)
+                onWindowsMutated?()
+                scheduleUnminimizeRetry(for: firstMin)
+            } else if visibleWindows.isEmpty && minimizedWindows.isEmpty {
+                AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                running.activate(options: [.activateAllWindows])
+                if let url = running.bundleURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                    let openCfg = NSWorkspace.OpenConfiguration()
+                    openCfg.activates = true
+                    NSWorkspace.shared.openApplication(at: url, configuration: openCfg)
+                }
+                onWindowsMutated?()
+            } else if running.bundleIdentifier == frontmostBundleID {
+                if let fw = AccessibilityBridge.focusedWindow(for: pid), !fw.isMinimized {
+                    AccessibilityBridge.setMinimized(fw.element, minimized: true)
+                } else {
+                    running.hide()
+                }
+                onWindowsMutated?()
+            } else {
+                AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                running.activate(options: [.activateAllWindows])
+                AccessibilityBridge.focusWindow(visibleWindows[0])
+                onWindowsMutated?()
             }
             return
         }
@@ -271,6 +318,26 @@ public final class RunningAppsModel {
         let openCfg = NSWorkspace.OpenConfiguration()
         openCfg.activates = true
         NSWorkspace.shared.openApplication(at: entry.url, configuration: openCfg)
+    }
+
+    private func scheduleUnminimizeRetry(for win: AXWindowInfo) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            guard let self else { return }
+            AXUIElementSetMessagingTimeout(win.element, 0.25)
+            var minRef: CFTypeRef?
+            let isStillMinimized: Bool
+            if AXUIElementCopyAttributeValue(win.element, kAXMinimizedAttribute as CFString, &minRef) == .success,
+               let minimizedBool = minRef as? Bool {
+                isStillMinimized = minimizedBool
+            } else {
+                isStillMinimized = false
+            }
+            if isStillMinimized {
+                AccessibilityBridge.setMinimized(win.element, minimized: false)
+                AccessibilityBridge.focusWindow(win)
+            }
+            self.onWindowsMutated?()
+        }
     }
 
     private func sendCmdN() {

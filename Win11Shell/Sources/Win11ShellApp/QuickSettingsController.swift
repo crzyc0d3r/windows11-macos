@@ -4,18 +4,141 @@ import SwiftUI
 import Win11ShellCore
 
 @MainActor
+internal final class FlyoutDismissCoordinator {
+    private weak var trackedPanel: NSPanel?
+    private var outsideMonitor: Any?
+    private var localMonitor: Any?
+    private var appObservers: [NSObjectProtocol] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
+
+    isolated deinit {
+        removeAll()
+    }
+
+    func install(
+        panel: NSPanel,
+        shouldDismissOnResignKey: @escaping @MainActor () -> Bool = { true },
+        onDismiss: @escaping @MainActor () -> Void
+    ) {
+        removeAll()
+        trackedPanel = panel
+
+        outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let panel = self.trackedPanel, panel.isVisible else { return }
+                let loc = NSEvent.mouseLocation
+                let inChild = panel.childWindows?.contains(where: { $0.frame.contains(loc) }) ?? false
+                if !panel.frame.contains(loc) && !inChild {
+                    onDismiss()
+                }
+            }
+        }
+
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, let panel = self.trackedPanel, panel.isVisible else { return event }
+            if let targetWindow = event.window {
+                let isOwn = targetWindow === panel
+                    || targetWindow.parent === panel
+                    || (panel.childWindows?.contains(where: { $0 === targetWindow }) ?? false)
+                let isTaskbarPanel = targetWindow.level == .statusBar
+                if !isOwn && !isTaskbarPanel {
+                    onDismiss()
+                }
+            } else if !panel.frame.contains(NSEvent.mouseLocation) {
+                onDismiss()
+            }
+            return event
+        }
+
+        let nc = NotificationCenter.default
+        let resignKey = nc.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.trackedPanel, panel.isVisible, shouldDismissOnResignKey() else { return }
+                if let keyWin = NSApp.keyWindow,
+                   keyWin === panel
+                    || keyWin.parent === panel
+                    || (panel.childWindows?.contains(where: { $0 === keyWin }) ?? false) {
+                    return
+                }
+                onDismiss()
+            }
+        }
+        appObservers.append(resignKey)
+
+        let resignActive = nc.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.trackedPanel, panel.isVisible else { return }
+                onDismiss()
+            }
+        }
+        appObservers.append(resignActive)
+
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let activateApp = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let activatedPID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.trackedPanel, panel.isVisible else { return }
+                if let activatedPID, activatedPID == currentPID {
+                    return
+                }
+                onDismiss()
+            }
+        }
+        workspaceObservers.append(activateApp)
+    }
+
+    func removeAll() {
+        trackedPanel = nil
+        if let outsideMonitor {
+            NSEvent.removeMonitor(outsideMonitor)
+            self.outsideMonitor = nil
+        }
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+            self.localMonitor = nil
+        }
+        let nc = NotificationCenter.default
+        for obs in appObservers {
+            nc.removeObserver(obs)
+        }
+        appObservers.removeAll()
+        let ws = NSWorkspace.shared.notificationCenter
+        for obs in workspaceObservers {
+            ws.removeObserver(obs)
+        }
+        workspaceObservers.removeAll()
+    }
+}
+
+@MainActor
 public final class QuickSettingsController {
     private let model: RunningAppsModel
     private let system: SystemControlsBridge
     public var onLaunchSnippingTool: (@MainActor () -> Void)?
     private var panel: FocusableFloatingPanel?
-    private var outsideMonitor: Any?
+    private let dismissCoordinator = FlyoutDismissCoordinator()
 
     public var isVisible: Bool { panel?.isVisible ?? false }
 
     public init(model: RunningAppsModel, system: SystemControlsBridge) {
         self.model = model
         self.system = system
+    }
+
+    isolated deinit {
+        dismissCoordinator.removeAll()
     }
 
     public func toggle(on screen: NSScreen? = nil) {
@@ -48,6 +171,7 @@ public final class QuickSettingsController {
                 defer: false
             )
             p.level = .popUpMenu
+            p.hidesOnDeactivate = false
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
             p.backgroundColor = .clear
             p.isOpaque = false
@@ -58,35 +182,26 @@ public final class QuickSettingsController {
         if let panel {
             panel.setContentSize(size)
             panel.contentView = hosting
-            let target = screen ?? NSScreen.main ?? NSScreen.screens.first
+            let mouseLocation = NSEvent.mouseLocation
+            let mouseScreen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
+            let target = screen ?? mouseScreen ?? NSScreen.main ?? NSScreen.screens.first
             if let target {
                 let x = target.frame.maxX - size.width - 12
                 let y = target.frame.minY + CGFloat(model.config.taskbarHeight) + 12
                 panel.setFrameOrigin(NSPoint(x: x, y: y))
+                NSApp.activate(ignoringOtherApps: true)
                 panel.makeKeyAndOrderFront(nil)
             }
+            dismissCoordinator.install(panel: panel) { [weak self] in
+                self?.dismiss()
+            }
         }
-        installOutsideMonitor()
     }
 
     public func dismiss() {
+        dismissCoordinator.removeAll()
+        panel?.makeFirstResponder(nil)
         panel?.orderOut(nil)
-        if let outsideMonitor {
-            NSEvent.removeMonitor(outsideMonitor)
-            self.outsideMonitor = nil
-        }
-    }
-
-    private func installOutsideMonitor() {
-        if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
-        outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let panel = self.panel, panel.isVisible else { return }
-                if !panel.frame.contains(NSEvent.mouseLocation) {
-                    self.dismiss()
-                }
-            }
-        }
     }
 }
 
@@ -328,7 +443,9 @@ public final class AuxiliaryFlyoutsController {
     private let system: SystemControlsBridge
     public var onLaunchSnippingTool: (@MainActor () -> Void)?
     private var panel: FocusableFloatingPanel?
-    private var outsideMonitor: Any?
+    private let dismissCoordinator = FlyoutDismissCoordinator()
+
+    public var isVisible: Bool { panel?.isVisible ?? false }
 
     public enum Mode {
         case trayOverflow
@@ -341,8 +458,12 @@ public final class AuxiliaryFlyoutsController {
         self.system = system
     }
 
+    isolated deinit {
+        dismissCoordinator.removeAll()
+    }
+
     public func show(mode: Mode, on screen: NSScreen? = nil) {
-        model.refreshAll()
+        model.refreshAll(forceTrayExtras: mode == .trayOverflow)
         system.refresh(forceBluetooth: true)
 
         let size: NSSize
@@ -367,6 +488,7 @@ public final class AuxiliaryFlyoutsController {
                 defer: false
             )
             p.level = .popUpMenu
+            p.hidesOnDeactivate = false
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
             p.backgroundColor = .clear
             p.isOpaque = false
@@ -378,7 +500,9 @@ public final class AuxiliaryFlyoutsController {
         panel.setContentSize(size)
         panel.contentView = NSHostingView(rootView: rootView)
 
-        let target = screen ?? NSScreen.main ?? NSScreen.screens.first
+        let mouseLocation = NSEvent.mouseLocation
+        let mouseScreen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
+        let target = screen ?? mouseScreen ?? NSScreen.main ?? NSScreen.screens.first
         if let target {
             let x: CGFloat
             switch mode {
@@ -391,29 +515,18 @@ public final class AuxiliaryFlyoutsController {
             }
             let y = target.frame.minY + CGFloat(model.config.taskbarHeight) + 12
             panel.setFrameOrigin(NSPoint(x: max(target.frame.minX + 8, min(x, target.frame.maxX - size.width - 8)), y: y))
+            NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         }
-        installOutsideMonitor()
+        dismissCoordinator.install(panel: panel) { [weak self] in
+            self?.dismiss()
+        }
     }
 
     public func dismiss() {
+        dismissCoordinator.removeAll()
+        panel?.makeFirstResponder(nil)
         panel?.orderOut(nil)
-        if let outsideMonitor {
-            NSEvent.removeMonitor(outsideMonitor)
-            self.outsideMonitor = nil
-        }
-    }
-
-    private func installOutsideMonitor() {
-        if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
-        outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let panel = self.panel, panel.isVisible else { return }
-                if !panel.frame.contains(NSEvent.mouseLocation) {
-                    self.dismiss()
-                }
-            }
-        }
     }
 }
 
@@ -486,6 +599,7 @@ private struct TrayOverflowView: View {
                 .fill(.ultraThickMaterial)
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
         )
+        .onExitCommand { onDismiss() }
     }
 }
 
@@ -550,6 +664,7 @@ private struct WidgetsFlyoutView: View {
                 .fill(.ultraThickMaterial)
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
         )
+        .onExitCommand { onDismiss() }
     }
 }
 
@@ -648,5 +763,6 @@ private struct TaskbarSettingsFlyoutView: View {
                 .fill(.ultraThickMaterial)
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
         )
+        .onExitCommand { onDismiss() }
     }
 }
