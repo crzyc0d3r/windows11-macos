@@ -189,44 +189,124 @@ struct AddressBarRowView: View {
     }
 
     private var breadcrumbContent: some View {
-        HStack(spacing: 2) {
-            FluentIconView(
-                kind: FluentIconKind(
-                    locationIcon: store.activeTab.location.iconKind,
-                    isTrashEmpty: store.isTrashEmpty
-                ),
-                size: 16
-            )
-            .padding(.leading, 8)
-            .padding(.trailing, 4)
+        GeometryReader { geometry in
+            let segments = breadcrumbSegments
+            let layout = computeBreadcrumbLayout(segments: segments, availableWidth: geometry.size.width)
 
-            ScrollView(.horizontal, showsIndicators: false) {
+            ZStack(alignment: .leading) {
+                // Full-pill empty-area click target behind the breadcrumb controls.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        beginPathEditing()
+                    }
+
                 HStack(spacing: 1) {
-                    let segments = breadcrumbSegments
-                    ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
+                    FluentIconView(
+                        kind: FluentIconKind(
+                            locationIcon: store.activeTab.location.iconKind,
+                            isTrashEmpty: store.isTrashEmpty
+                        ),
+                        size: 16
+                    )
+                    .padding(.leading, 8)
+                    .padding(.trailing, 4)
+
+                    if !layout.overflowSegments.isEmpty {
+                        overflowAncestorsButton(segments: layout.overflowSegments)
+                    }
+
+                    ForEach(Array(layout.visibleSegments.enumerated()), id: \.element.id) { index, segment in
                         breadcrumbSegmentButton(segment)
 
-                        if index < segments.count - 1 || segment.folderURL != nil {
+                        if index < layout.visibleSegments.count - 1 || segment.folderURL != nil {
                             chevronPopoverButton(for: segment)
                         }
                     }
-                }
-                .padding(.vertical, 2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Empty clickable area to enter path edit mode.
-            Color.clear
-                .frame(minWidth: 28, maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    beginPathEditing()
+                    Spacer(minLength: 16)
                 }
+                .padding(.trailing, 6)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
         }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            beginPathEditing()
+        .frame(height: 32)
+    }
+
+    private func overflowAncestorsButton(segments: [BreadcrumbSegment]) -> some View {
+        Menu {
+            ForEach(segments) { segment in
+                Button {
+                    store.navigate(to: segment.location)
+                } label: {
+                    Label(segment.title, systemImage: segment.folderURL == nil ? "desktopcomputer" : "folder")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(theme.palette.textSecondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(theme.palette.hoverFill.opacity(0.6))
+                )
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.trailing, 2)
+        .help("Earlier path folders")
+    }
+
+    private func computeBreadcrumbLayout(
+        segments: [BreadcrumbSegment],
+        availableWidth: CGFloat
+    ) -> (overflowSegments: [BreadcrumbSegment], visibleSegments: [BreadcrumbSegment]) {
+        guard !segments.isEmpty else { return ([], []) }
+
+        let iconAndPadding: CGFloat = 34
+        let trailingBuffer: CGFloat = 24
+        let overflowButtonWidth: CGFloat = 26
+        let chevronWidth: CGFloat = 18
+
+        let font = NSFont.systemFont(ofSize: 12.5, weight: .regular)
+        let segmentWidths: [CGFloat] = segments.enumerated().map { index, segment in
+            let textWidth = ceil((segment.title as NSString).size(withAttributes: [.font: font]).width)
+            let buttonWidth = textWidth + 14
+            let hasChevron = index < segments.count - 1 || segment.folderURL != nil
+            return buttonWidth + (hasChevron ? chevronWidth : 0) + 2
+        }
+
+        let usableWidth = max(120, availableWidth - iconAndPadding - trailingBuffer)
+        let totalWidth = segmentWidths.reduce(0, +)
+        if totalWidth <= usableWidth {
+            return ([], segments)
+        }
+
+        // Collapse leading ancestors into `«` so the current folder and immediate parents always stay visible.
+        var visibleCount = 1
+        var usedWidth = segmentWidths[segments.count - 1]
+        let budgetWithOverflow = max(80, usableWidth - overflowButtonWidth)
+
+        if segments.count > 1 {
+            for index in stride(from: segments.count - 2, through: 0, by: -1) {
+                let candidateWidth = segmentWidths[index]
+                let remainingBudget = (index == 0) ? usableWidth : budgetWithOverflow
+                if usedWidth + candidateWidth <= remainingBudget {
+                    usedWidth += candidateWidth
+                    visibleCount += 1
+                } else {
+                    break
+                }
+            }
+        }
+
+        let splitIndex = max(0, segments.count - visibleCount)
+        return (
+            Array(segments[..<splitIndex]),
+            Array(segments[splitIndex...])
+        )
     }
 
     private func breadcrumbSegmentButton(_ segment: BreadcrumbSegment) -> some View {

@@ -170,7 +170,18 @@ public struct NavigationPaneView: View {
                     }
                 }
 
-                ForEach(store.volumes) { volume in
+                ForEach(store.sidebarTreeNodes) { node in
+                    SidebarTreeBranchView(
+                        node: node,
+                        indentLevel: 1,
+                        store: store,
+                        lazyChildrenByURL: $lazyChildrenByURL,
+                        loadingFolderURLs: $loadingFolderURLs,
+                        isFolderActive: isFolderActive
+                    )
+                }
+
+                ForEach(deduplicatedVolumes) { volume in
                     let iconKind: FluentIconKind = {
                         switch volume.volumeKind {
                         case .internalDrive: return .hardDrive
@@ -189,17 +200,6 @@ public struct NavigationPaneView: View {
                     ) {
                         store.navigate(to: .folder(volume.url))
                     }
-                }
-
-                ForEach(store.sidebarTreeNodes) { node in
-                    SidebarTreeBranchView(
-                        node: node,
-                        indentLevel: 1,
-                        store: store,
-                        lazyChildrenByURL: $lazyChildrenByURL,
-                        loadingFolderURLs: $loadingFolderURLs,
-                        isFolderActive: isFolderActive
-                    )
                 }
             }
         }
@@ -237,6 +237,11 @@ public struct NavigationPaneView: View {
             ("Music", home.appendingPathComponent("Music", isDirectory: true), .music),
             ("Videos", home.appendingPathComponent("Movies", isDirectory: true), .videos)
         ]
+    }
+
+    private var deduplicatedVolumes: [VolumeInfo] {
+        let treeRootURLs = Set(store.sidebarTreeNodes.map { $0.url.standardizedFileURL })
+        return store.volumes.filter { !treeRootURLs.contains($0.url.standardizedFileURL) }
     }
 
     private func isFolderActive(_ url: URL) -> Bool {
@@ -512,7 +517,7 @@ private struct SidebarRowView: View {
             .padding(.leading, 6 + CGFloat(indentLevel) * 14)
             .padding(.trailing, 8)
         }
-        .frame(height: theme.isCompact ? 26 : 30)
+        .frame(height: theme.isCompact ? 24 : 28)
         .contentShape(Rectangle())
         .onTapGesture(perform: action)
         .onHover { hovering in

@@ -153,45 +153,11 @@ struct CommandBarView: View {
     // MARK: - + New ▾ Menu
 
     private func newMenu(isEnabled: Bool) -> some View {
-        Menu {
-            Button {
-                store.newFolder()
-            } label: {
-                Label("Folder", systemImage: "folder.badge.plus")
-            }
-
-            Divider()
-
-            Button {
-                store.newFile(named: "New Text Document", fileExtension: "txt")
-            } label: {
-                Label("Text Document (.txt)", systemImage: "doc.plaintext")
-            }
-
-            Button {
-                store.newFile(named: "New Markdown Document", fileExtension: "md")
-            } label: {
-                Label("Markdown Document (.md)", systemImage: "doc.text")
-            }
-
-            Button {
-                store.newFile(named: "New JSON File", fileExtension: "json")
-            } label: {
-                Label("JSON File (.json)", systemImage: "curlybraces")
-            }
-
-            Button {
-                store.newFile(named: "script", fileExtension: "sh")
-            } label: {
-                Label("Shell Script (.sh)", systemImage: "terminal")
-            }
-
-            Button {
-                store.newFile(named: "New Rich Text Document", fileExtension: "rtf")
-            } label: {
-                Label("Rich Text Document (.rtf)", systemImage: "doc.richtext")
-            }
-        } label: {
+        CommandBarPopupButton(
+            isEnabled: isEnabled,
+            tooltip: "Create a new item in the current folder",
+            menuBuilder: { buildNewNSMenu() }
+        ) {
             HStack(spacing: 5) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 14, weight: .semibold))
@@ -201,78 +167,21 @@ struct CommandBarView: View {
                     .foregroundStyle(isEnabled ? theme.palette.textPrimary : theme.palette.textSecondary.opacity(0.4))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(theme.palette.textSecondary)
+                    .foregroundStyle(isEnabled ? theme.palette.textSecondary : theme.palette.textSecondary.opacity(0.4))
             }
             .padding(.horizontal, 8)
             .frame(height: 32)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .disabled(!isEnabled)
-        .help("Create a new item in the current folder")
     }
 
     // MARK: - ⇅ Sort ▾ Menu
 
     private var sortMenu: some View {
-        Menu {
-            Section("Sort by") {
-                ForEach(SortField.allCases, id: \.self) { field in
-                    Button {
-                        store.setSort(field: field)
-                    } label: {
-                        HStack {
-                            Text(field.displayTitle)
-                            if store.activeTab.sortField == field {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
-
-            Divider()
-
-            Button {
-                store.setSort(field: store.activeTab.sortField, order: .ascending)
-            } label: {
-                HStack {
-                    Text("Ascending")
-                    if store.activeTab.sortOrder == .ascending {
-                        Image(systemName: "checkmark")
-                    }
-                }
-            }
-
-            Button {
-                store.setSort(field: store.activeTab.sortField, order: .descending)
-            } label: {
-                HStack {
-                    Text("Descending")
-                    if store.activeTab.sortOrder == .descending {
-                        Image(systemName: "checkmark")
-                    }
-                }
-            }
-
-            Divider()
-
-            Menu("Group by") {
-                ForEach(GroupByField.allCases, id: \.self) { groupField in
-                    Button {
-                        store.setGroupBy(groupField)
-                    } label: {
-                        HStack {
-                            Text(groupField.displayTitle)
-                            if store.activeTab.groupBy == groupField {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
-        } label: {
+        CommandBarPopupButton(
+            isEnabled: true,
+            tooltip: "Sort and group items",
+            menuBuilder: { buildSortNSMenu() }
+        ) {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.up.arrow.down")
                     .font(.system(size: 12, weight: .medium))
@@ -286,112 +195,16 @@ struct CommandBarView: View {
             .padding(.horizontal, 8)
             .frame(height: 32)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Sort and group items")
     }
 
     // MARK: - ⊞ View ▾ Menu
 
     private var viewMenu: some View {
-        Menu {
-            ForEach(ViewMode.allCases, id: \.self) { mode in
-                Button {
-                    store.setViewMode(mode)
-                } label: {
-                    HStack {
-                        Label(mode.displayTitle, systemImage: mode.iconSystemName)
-                        if store.activeTab.viewMode == mode {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-            }
-
-            Divider()
-
-            Button {
-                store.toggleCompactView()
-            } label: {
-                HStack {
-                    Text("Compact view")
-                    if store.settings.compactView {
-                        Image(systemName: "checkmark")
-                    }
-                }
-            }
-
-            Menu("Show") {
-                Button {
-                    store.toggleNavigationPane()
-                } label: {
-                    HStack {
-                        Text("Navigation pane")
-                        if store.settings.showNavigationPane {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Button {
-                    store.setRightPaneMode(.details)
-                } label: {
-                    HStack {
-                        Text("Details pane")
-                        if store.settings.rightPaneMode == .details {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Button {
-                    store.setRightPaneMode(.preview)
-                } label: {
-                    HStack {
-                        Text("Preview pane")
-                        if store.settings.rightPaneMode == .preview {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Divider()
-
-                Button {
-                    store.toggleCheckboxes()
-                } label: {
-                    HStack {
-                        Text("Item check boxes")
-                        if store.settings.showCheckboxes {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Button {
-                    store.toggleFileExtensions()
-                } label: {
-                    HStack {
-                        Text("File name extensions")
-                        if store.settings.showFileExtensions {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Button {
-                    store.toggleHiddenFiles()
-                } label: {
-                    HStack {
-                        Text("Hidden items")
-                        if store.settings.showHiddenFiles {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-            }
-        } label: {
+        CommandBarPopupButton(
+            isEnabled: true,
+            tooltip: "Change layout and visibility options",
+            menuBuilder: { buildViewNSMenu() }
+        ) {
             HStack(spacing: 5) {
                 Image(systemName: "square.grid.2x2")
                     .font(.system(size: 12, weight: .medium))
@@ -405,87 +218,257 @@ struct CommandBarView: View {
             .padding(.horizontal, 8)
             .frame(height: 32)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Change layout and visibility options")
     }
 
     // MARK: - ⋯ More Menu
 
     private var moreMenu: some View {
-        let hasSelection = !store.selectedItems.isEmpty
-        let canExtract = store.selectedItems.count == 1 && store.selectedItems.first?.kind == .archive
-        let propertiesTarget = store.primarySelectedItem?.url ?? store.activeTab.location.urlIfFolder
-
-        return Menu {
-            Button {
-                store.undo()
-            } label: {
-                Text(store.undoDescription.map { "Undo \($0)" } ?? "Undo")
-            }
-            .disabled(!store.canUndo)
-
-            Button {
-                store.redo()
-            } label: {
-                Text(store.redoDescription.map { "Redo \($0)" } ?? "Redo")
-            }
-            .disabled(!store.canRedo)
-
-            Divider()
-
-            Button("Select all") {
-                store.selectAll()
-            }
-            .disabled(store.currentItems.isEmpty)
-
-            Button("Select none") {
-                store.deselectAll()
-            }
-            .disabled(!hasSelection)
-
-            Button("Invert selection") {
-                store.invertSelection()
-            }
-            .disabled(store.currentItems.isEmpty)
-
-            Divider()
-
-            Button("Compress to ZIP file") {
-                store.zipSelectedItems()
-            }
-            .disabled(!hasSelection)
-
-            Button("Extract all") {
-                if let archive = store.selectedItems.first {
-                    store.extractArchive(at: archive.url)
-                }
-            }
-            .disabled(!canExtract)
-
-            Divider()
-
-            Button("Properties") {
-                if let target = propertiesTarget {
-                    store.showProperties(for: target)
-                }
-            }
-            .disabled(propertiesTarget == nil)
-
-            Button("Options...") {
-                store.openSettings()
-            }
-        } label: {
+        CommandBarPopupButton(
+            isEnabled: true,
+            tooltip: "See more",
+            menuBuilder: { buildMoreNSMenu() }
+        ) {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(theme.palette.textPrimary)
                 .frame(width: 28, height: 32)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("See more")
+    }
+
+    // MARK: - NSMenu Builders
+
+    private func buildNewNSMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(makeActionItem(title: "Folder", systemImage: "folder.badge.plus") {
+            store.newFolder()
+        })
+        menu.addItem(.separator())
+        menu.addItem(makeActionItem(title: "Text Document (.txt)", systemImage: "doc.plaintext") {
+            store.newFile(named: "New Text Document", fileExtension: "txt")
+        })
+        menu.addItem(makeActionItem(title: "Markdown Document (.md)", systemImage: "doc.text") {
+            store.newFile(named: "New Markdown Document", fileExtension: "md")
+        })
+        menu.addItem(makeActionItem(title: "JSON File (.json)", systemImage: "curlybraces") {
+            store.newFile(named: "New JSON File", fileExtension: "json")
+        })
+        menu.addItem(makeActionItem(title: "Shell Script (.sh)", systemImage: "terminal") {
+            store.newFile(named: "script", fileExtension: "sh")
+        })
+        menu.addItem(makeActionItem(title: "Rich Text Document (.rtf)", systemImage: "doc.richtext") {
+            store.newFile(named: "New Rich Text Document", fileExtension: "rtf")
+        })
+        return menu
+    }
+
+    private func buildSortNSMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let header = NSMenuItem(title: "Sort by", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        for field in SortField.allCases {
+            menu.addItem(makeActionItem(
+                title: field.displayTitle,
+                isChecked: store.activeTab.sortField == field
+            ) {
+                store.setSort(field: field)
+            })
+        }
+
+        menu.addItem(.separator())
+
+        menu.addItem(makeActionItem(
+            title: "Ascending",
+            isChecked: store.activeTab.sortOrder == .ascending
+        ) {
+            store.setSort(field: store.activeTab.sortField, order: .ascending)
+        })
+        menu.addItem(makeActionItem(
+            title: "Descending",
+            isChecked: store.activeTab.sortOrder == .descending
+        ) {
+            store.setSort(field: store.activeTab.sortField, order: .descending)
+        })
+
+        menu.addItem(.separator())
+
+        let groupMenu = NSMenu()
+        groupMenu.autoenablesItems = false
+        for groupField in GroupByField.allCases {
+            groupMenu.addItem(makeActionItem(
+                title: groupField.displayTitle,
+                isChecked: store.activeTab.groupBy == groupField
+            ) {
+                store.setGroupBy(groupField)
+            })
+        }
+        let groupItem = NSMenuItem(title: "Group by", action: nil, keyEquivalent: "")
+        groupItem.submenu = groupMenu
+        menu.addItem(groupItem)
+
+        return menu
+    }
+
+    private func buildViewNSMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        for mode in ViewMode.allCases {
+            menu.addItem(makeActionItem(
+                title: mode.displayTitle,
+                systemImage: mode.iconSystemName,
+                isChecked: store.activeTab.viewMode == mode
+            ) {
+                store.setViewMode(mode)
+            })
+        }
+
+        menu.addItem(.separator())
+
+        menu.addItem(makeActionItem(
+            title: "Compact view",
+            isChecked: store.settings.compactView
+        ) {
+            store.toggleCompactView()
+        })
+
+        let showMenu = NSMenu()
+        showMenu.autoenablesItems = false
+        showMenu.addItem(makeActionItem(
+            title: "Navigation pane",
+            isChecked: store.settings.showNavigationPane
+        ) {
+            store.toggleNavigationPane()
+        })
+        showMenu.addItem(makeActionItem(
+            title: "Details pane",
+            isChecked: store.settings.rightPaneMode == .details
+        ) {
+            store.setRightPaneMode(.details)
+        })
+        showMenu.addItem(makeActionItem(
+            title: "Preview pane",
+            isChecked: store.settings.rightPaneMode == .preview
+        ) {
+            store.setRightPaneMode(.preview)
+        })
+        showMenu.addItem(.separator())
+        showMenu.addItem(makeActionItem(
+            title: "Item check boxes",
+            isChecked: store.settings.showCheckboxes
+        ) {
+            store.toggleCheckboxes()
+        })
+        showMenu.addItem(makeActionItem(
+            title: "File name extensions",
+            isChecked: store.settings.showFileExtensions
+        ) {
+            store.toggleFileExtensions()
+        })
+        showMenu.addItem(makeActionItem(
+            title: "Hidden items",
+            isChecked: store.settings.showHiddenFiles
+        ) {
+            store.toggleHiddenFiles()
+        })
+
+        let showItem = NSMenuItem(title: "Show", action: nil, keyEquivalent: "")
+        showItem.submenu = showMenu
+        menu.addItem(showItem)
+
+        return menu
+    }
+
+    private func buildMoreNSMenu() -> NSMenu {
+        let hasSelection = !store.selectedItems.isEmpty
+        let canExtract = store.selectedItems.count == 1 && store.selectedItems.first?.kind == .archive
+        let propertiesTarget = store.primarySelectedItem?.url ?? store.activeTab.location.urlIfFolder
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        menu.addItem(makeActionItem(
+            title: store.undoDescription.map { "Undo \($0)" } ?? "Undo",
+            isEnabled: store.canUndo
+        ) {
+            store.undo()
+        })
+        menu.addItem(makeActionItem(
+            title: store.redoDescription.map { "Redo \($0)" } ?? "Redo",
+            isEnabled: store.canRedo
+        ) {
+            store.redo()
+        })
+        menu.addItem(.separator())
+        menu.addItem(makeActionItem(
+            title: "Select all",
+            isEnabled: !store.currentItems.isEmpty
+        ) {
+            store.selectAll()
+        })
+        menu.addItem(makeActionItem(
+            title: "Select none",
+            isEnabled: hasSelection
+        ) {
+            store.deselectAll()
+        })
+        menu.addItem(makeActionItem(
+            title: "Invert selection",
+            isEnabled: !store.currentItems.isEmpty
+        ) {
+            store.invertSelection()
+        })
+        menu.addItem(.separator())
+        menu.addItem(makeActionItem(
+            title: "Compress to ZIP file",
+            isEnabled: hasSelection
+        ) {
+            store.zipSelectedItems()
+        })
+        menu.addItem(makeActionItem(
+            title: "Extract all",
+            isEnabled: canExtract
+        ) {
+            if let archive = store.selectedItems.first {
+                store.extractArchive(at: archive.url)
+            }
+        })
+        menu.addItem(.separator())
+        menu.addItem(makeActionItem(
+            title: "Properties",
+            isEnabled: propertiesTarget != nil
+        ) {
+            if let target = propertiesTarget {
+                store.showProperties(for: target)
+            }
+        })
+        menu.addItem(makeActionItem(title: "Options...") {
+            store.openSettings()
+        })
+        return menu
+    }
+
+    private func makeActionItem(
+        title: String,
+        systemImage: String? = nil,
+        isChecked: Bool = false,
+        isEnabled: Bool = true,
+        action: @escaping @MainActor () -> Void
+    ) -> NSMenuItem {
+        let target = MenuClosureTarget(action: action)
+        let item = NSMenuItem(title: title, action: #selector(MenuClosureTarget.perform(_:)), keyEquivalent: "")
+        item.target = target
+        item.representedObject = target
+        item.isEnabled = isEnabled
+        item.state = isChecked ? .on : .off
+        if let systemImage {
+            item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+        }
+        return item
     }
 
     // MARK: - Right Details / Preview Toggle Pill
@@ -515,6 +498,73 @@ struct CommandBarView: View {
             .fill(theme.palette.borderSubtle)
             .frame(width: 1, height: 20)
             .padding(.horizontal, 4)
+    }
+}
+
+// MARK: - Native Popup Menu Button (preserves exact SwiftUI label + chevron.down)
+
+@MainActor
+private final class MenuClosureTarget: NSObject {
+    let action: @MainActor () -> Void
+
+    init(action: @escaping @MainActor () -> Void) {
+        self.action = action
+    }
+
+    @objc func perform(_ sender: Any?) {
+        action()
+    }
+}
+
+private struct CommandBarPopupButton<Label: View>: View {
+    let isEnabled: Bool
+    let tooltip: String
+    let menuBuilder: () -> NSMenu
+    @ViewBuilder let label: () -> Label
+
+    @Environment(\.fluentTheme) private var theme
+    @State private var isHovered = false
+    @State private var anchorView: NSView?
+
+    var body: some View {
+        Button {
+            guard isEnabled, let anchorView else { return }
+            let menu = menuBuilder()
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchorView.bounds.height + 4), in: anchorView)
+        } label: {
+            label()
+                .background(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusSmall, style: .continuous)
+                        .fill(isEnabled && isHovered ? theme.palette.hoverFill : .clear)
+                )
+                .background(PopupAnchorView(anchorView: $anchorView))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .help(tooltip)
+    }
+}
+
+private struct PopupAnchorView: NSViewRepresentable {
+    @Binding var anchorView: NSView?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        Task { @MainActor in
+            anchorView = view
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if anchorView !== nsView {
+            Task { @MainActor in
+                anchorView = nsView
+            }
+        }
     }
 }
 

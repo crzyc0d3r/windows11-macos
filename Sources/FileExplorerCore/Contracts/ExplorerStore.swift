@@ -537,7 +537,7 @@ public final class ExplorerStore {
                 name: home.lastPathComponent,
                 iconKind: .home,
                 children: userSubfolders,
-                isExpanded: true,
+                isExpanded: false,
                 hasChildren: true
             )
 
@@ -572,7 +572,7 @@ public final class ExplorerStore {
                     name: "Macintosh HD",
                     iconKind: .hardDrive,
                     children: rootChildren,
-                    isExpanded: true,
+                    isExpanded: false,
                     hasChildren: true
                 )
             ]
@@ -1930,9 +1930,9 @@ public final class ExplorerStore {
                         SidebarTreeNode(url: documents, name: "Documents", iconKind: .documents, children: [], hasChildren: true),
                         SidebarTreeNode(url: downloads, name: "Downloads", iconKind: .downloads, children: [], hasChildren: false),
                         SidebarTreeNode(url: pictures, name: "Pictures", iconKind: .pictures, children: [], hasChildren: false)
-                    ], isExpanded: true, hasChildren: true)
+                    ], isExpanded: false, hasChildren: true)
                 ],
-                isExpanded: true,
+                isExpanded: false,
                 hasChildren: true
             )
         ]

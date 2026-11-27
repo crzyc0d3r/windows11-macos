@@ -37,6 +37,7 @@ struct ContractSmokeTests {
         #expect(!store.currentItems.isEmpty)
         #expect(!store.volumes.isEmpty)
         #expect(!store.pinnedFolders.isEmpty)
+        #expect(store.sidebarTreeNodes.first?.isExpanded == false)
 
         let initialCount = store.currentItems.count
         store.newFolder(named: "Contracts Test")
