@@ -507,4 +507,193 @@ public enum WindowChromeGeometry {
         }
         return false
     }
+
+    // MARK: - Background Bar Occlusion & Edge Resizing Geometry
+
+    /// Returns intersections of `occludersAX` with `rectAX` expressed in top-left local coordinates of `rectAX`.
+    public static func occludedLocalRects(in rectAX: CGRect, occludedBy occludersAX: [CGRect]) -> [CGRect] {
+        guard rectAX.width > 0, rectAX.height > 0 else { return [] }
+        var result: [CGRect] = []
+        result.reserveCapacity(occludersAX.count)
+        for occ in occludersAX {
+            let inter = rectAX.intersection(occ)
+            guard !inter.isNull, inter.width > 0.01, inter.height > 0.01 else {
+                continue
+            }
+            result.append(CGRect(
+                x: inter.minX - rectAX.minX,
+                y: inter.minY - rectAX.minY,
+                width: inter.width,
+                height: inter.height
+            ))
+        }
+        return result
+    }
+
+    /// Returns `true` when `rectAX` is 100% covered by the union of `occludersAX` via exact X-strip sweep.
+    public static func isFullyOccluded(_ rectAX: CGRect, occludedBy occludersAX: [CGRect]) -> Bool {
+        guard !rectAX.isNull, rectAX.width > 0.01, rectAX.height > 0.01 else {
+            return false
+        }
+
+        var clipped: [CGRect] = []
+        clipped.reserveCapacity(occludersAX.count)
+        var rawXs: [CGFloat] = [rectAX.minX, rectAX.maxX]
+        rawXs.reserveCapacity(occludersAX.count * 2 + 2)
+
+        for occ in occludersAX {
+            let inter = rectAX.intersection(occ)
+            guard !inter.isNull, inter.width > 0.01, inter.height > 0.01 else {
+                continue
+            }
+            clipped.append(inter)
+            rawXs.append(inter.minX)
+            rawXs.append(inter.maxX)
+        }
+
+        guard !clipped.isEmpty else { return false }
+
+        rawXs.sort()
+        var xs: [CGFloat] = []
+        xs.reserveCapacity(rawXs.count)
+        for x in rawXs {
+            if let last = xs.last, abs(x - last) <= 0.005 {
+                continue
+            }
+            xs.append(x)
+        }
+
+        guard xs.count >= 2 else { return false }
+
+        for i in 0..<(xs.count - 1) {
+            let x0 = xs[i]
+            let x1 = xs[i + 1]
+            if x1 - x0 <= 0.01 { continue }
+            let midX = (x0 + x1) * 0.5
+
+            var yIntervals: [(minY: CGFloat, maxY: CGFloat)] = []
+            for r in clipped where r.minX <= midX && r.maxX >= midX {
+                yIntervals.append((r.minY, r.maxY))
+            }
+            if yIntervals.isEmpty {
+                return false
+            }
+            yIntervals.sort {
+                if $0.minY != $1.minY { return $0.minY < $1.minY }
+                return $0.maxY < $1.maxY
+            }
+
+            var coveredY = rectAX.minY
+            for interval in yIntervals {
+                if interval.minY > coveredY + 0.01 {
+                    return false
+                }
+                if interval.maxY > coveredY {
+                    coveredY = interval.maxY
+                }
+                if coveredY >= rectAX.maxY - 0.01 {
+                    break
+                }
+            }
+            if coveredY < rectAX.maxY - 0.01 {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    public enum ChromeBarResizeEdge: Equatable, Sendable {
+        case top
+        case topLeft
+        case topRight
+        case left
+        case right
+    }
+
+    /// Hit-tests the outer resize borders and top corners of a chrome bar in top-left local coordinates.
+    public static func chromeBarResizeEdge(
+        atLocalPoint pt: CGPoint,
+        barSize: CGSize,
+        topBorder: CGFloat = 5,
+        sideBorder: CGFloat = 5,
+        cornerSize: CGFloat = 10,
+        isTopClipped: Bool = false,
+        isLeftClipped: Bool = false,
+        isRightClipped: Bool = false
+    ) -> ChromeBarResizeEdge? {
+        guard barSize.width > 0,
+              barSize.height > 0,
+              pt.x >= 0, pt.x <= barSize.width,
+              pt.y >= 0, pt.y <= barSize.height
+        else {
+            return nil
+        }
+
+        let nearTop = !isTopClipped && pt.y <= topBorder
+        let nearLeft = !isLeftClipped && pt.x <= sideBorder
+        let nearRight = !isRightClipped && pt.x >= barSize.width - sideBorder
+
+        let inTopCornerY = !isTopClipped && pt.y <= cornerSize
+        let inLeftCornerX = !isLeftClipped && pt.x <= cornerSize
+        let inRightCornerX = !isRightClipped && pt.x >= barSize.width - cornerSize
+
+        if inTopCornerY && inLeftCornerX {
+            return .topLeft
+        }
+        if inTopCornerY && inRightCornerX {
+            return .topRight
+        }
+        if nearTop {
+            return .top
+        }
+        if nearLeft {
+            return .left
+        }
+        if nearRight {
+            return .right
+        }
+        return nil
+    }
+
+    /// Computes a clamped window AX frame while dragging one of the chrome bar's top/side resize edges.
+    public static func resizedWindowAXFrame(
+        startWindowAXFrame: CGRect,
+        edge: ChromeBarResizeEdge,
+        deltaAX: CGSize,
+        minSize: CGSize = CGSize(width: 260, height: 160),
+        minWindowTopAX: CGFloat
+    ) -> CGRect {
+        var minX = startWindowAXFrame.minX
+        var maxX = startWindowAXFrame.maxX
+        var minY = startWindowAXFrame.minY
+        let maxY = startWindowAXFrame.maxY
+
+        switch edge {
+        case .left, .topLeft:
+            let proposedMinX = startWindowAXFrame.minX + deltaAX.width
+            minX = min(proposedMinX, maxX - minSize.width)
+        case .right, .topRight:
+            let proposedMaxX = startWindowAXFrame.maxX + deltaAX.width
+            maxX = max(proposedMaxX, minX + minSize.width)
+        case .top:
+            break
+        }
+
+        switch edge {
+        case .top, .topLeft, .topRight:
+            let proposedMinY = startWindowAXFrame.minY + deltaAX.height
+            let maxAllowedMinY = max(minWindowTopAX, maxY - minSize.height)
+            minY = min(max(proposedMinY, minWindowTopAX), maxAllowedMinY)
+        case .left, .right:
+            break
+        }
+
+        return CGRect(
+            x: minX,
+            y: minY,
+            width: max(minSize.width, maxX - minX),
+            height: max(minSize.height, maxY - minY)
+        )
+    }
 }

@@ -603,4 +603,166 @@ struct Win11ShellCoreTests {
             ) == nil
         )
     }
+
+    @Test("occludedLocalRects maps occluding windows into top-left local bar coordinates")
+    func occludedLocalRectsMapping() {
+        let barAX = CGRect(x: 200, y: 100, width: 800, height: 28)
+
+        // Non-intersecting and edge-touching occluders yield empty
+        #expect(WindowChromeGeometry.occludedLocalRects(
+            in: barAX,
+            occludedBy: [
+                CGRect(x: 0, y: 0, width: 200, height: 200),
+                CGRect(x: 200, y: 128, width: 800, height: 500)
+            ]
+        ).isEmpty)
+
+        // Partial overlaps produce exact top-left local rects
+        let occ1 = CGRect(x: 150, y: 80, width: 250, height: 40) // overlaps x: 200..400, y: 100..120
+        let occ2 = CGRect(x: 700, y: 110, width: 400, height: 100) // overlaps x: 700..1000, y: 110..128
+        let locals = WindowChromeGeometry.occludedLocalRects(in: barAX, occludedBy: [occ1, occ2])
+        #expect(locals == [
+            CGRect(x: 0, y: 0, width: 200, height: 20),
+            CGRect(x: 500, y: 10, width: 300, height: 18)
+        ])
+    }
+
+    @Test("isFullyOccluded detects exact multi-window coverage vs tiny uncovered gaps")
+    func fullOcclusionSweepCheck() {
+        let barAX = CGRect(x: 100, y: 200, width: 800, height: 28)
+
+        // Single partial occluder
+        #expect(!WindowChromeGeometry.isFullyOccluded(
+            barAX,
+            occludedBy: [CGRect(x: 100, y: 200, width: 799, height: 28)]
+        ))
+
+        // Side-by-side split coverage across two front windows
+        #expect(WindowChromeGeometry.isFullyOccluded(
+            barAX,
+            occludedBy: [
+                CGRect(x: 50, y: 150, width: 450, height: 200),
+                CGRect(x: 500, y: 180, width: 500, height: 100)
+            ]
+        ))
+
+        // Vertical split coverage (top half + bottom half)
+        #expect(WindowChromeGeometry.isFullyOccluded(
+            barAX,
+            occludedBy: [
+                CGRect(x: 100, y: 200, width: 800, height: 14),
+                CGRect(x: 100, y: 214, width: 800, height: 14)
+            ]
+        ))
+
+        // Overlapping quadrants leaving a 2pt gap in the middle
+        #expect(!WindowChromeGeometry.isFullyOccluded(
+            barAX,
+            occludedBy: [
+                CGRect(x: 100, y: 200, width: 399, height: 28),
+                CGRect(x: 501, y: 200, width: 399, height: 28),
+                CGRect(x: 400, y: 200, width: 200, height: 12),
+                CGRect(x: 400, y: 214, width: 200, height: 14)
+            ]
+        ))
+
+        // Filling that 2pt gap completes full occlusion
+        #expect(WindowChromeGeometry.isFullyOccluded(
+            barAX,
+            occludedBy: [
+                CGRect(x: 100, y: 200, width: 399, height: 28),
+                CGRect(x: 501, y: 200, width: 399, height: 28),
+                CGRect(x: 400, y: 200, width: 200, height: 14),
+                CGRect(x: 400, y: 214, width: 200, height: 14)
+            ]
+        ))
+    }
+
+    @Test("chromeBarResizeEdge hit-tests outer borders, corners, interior controls, and clipped edges")
+    func chromeBarResizeEdgeHitTesting() {
+        let size = CGSize(width: 800, height: 28)
+
+        // 10x10 top corners
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 0, y: 0), barSize: size) == .topLeft)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 9, y: 9), barSize: size) == .topLeft)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 790, y: 8), barSize: size) == .topRight)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 800, y: 0), barSize: size) == .topRight)
+
+        // Outer 5pt borders
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 400, y: 3), barSize: size) == .top)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 4, y: 18), barSize: size) == .left)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 796, y: 22), barSize: size) == .right)
+
+        // Interior points and out-of-bounds return nil
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 15, y: 6), barSize: size) == nil)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 400, y: 14), barSize: size) == nil)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 794, y: 18), barSize: size) == nil)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: -1, y: 10), barSize: size) == nil)
+
+        // Clipped edges suppress corresponding resize edge/corner
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 2, y: 2), barSize: size, isLeftClipped: true) == .top)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 2, y: 18), barSize: size, isLeftClipped: true) == nil)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 798, y: 2), barSize: size, isRightClipped: true) == .top)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 798, y: 18), barSize: size, isRightClipped: true) == nil)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 400, y: 2), barSize: size, isTopClipped: true) == nil)
+        #expect(WindowChromeGeometry.chromeBarResizeEdge(atLocalPoint: CGPoint(x: 2, y: 2), barSize: size, isTopClipped: true) == .left)
+    }
+
+    @Test("resizedWindowAXFrame resizes from each edge while enforcing minSize and minWindowTopAX")
+    func resizedWindowAXFrameClamping() {
+        let start = CGRect(x: 200, y: 180, width: 800, height: 600)
+        let minTop: CGFloat = 66
+
+        // Left resize keeps maxX (1000) fixed and clamps at minSize.width (260)
+        let leftGrow = WindowChromeGeometry.resizedWindowAXFrame(
+            startWindowAXFrame: start,
+            edge: .left,
+            deltaAX: CGSize(width: -50, height: 40),
+            minWindowTopAX: minTop
+        )
+        #expect(leftGrow == CGRect(x: 150, y: 180, width: 850, height: 600))
+
+        let leftClamped = WindowChromeGeometry.resizedWindowAXFrame(
+            startWindowAXFrame: start,
+            edge: .left,
+            deltaAX: CGSize(width: 700, height: 0),
+            minWindowTopAX: minTop
+        )
+        #expect(leftClamped == CGRect(x: 740, y: 180, width: 260, height: 600))
+
+        // Right resize keeps minX (200) fixed
+        let rightShrinkClamped = WindowChromeGeometry.resizedWindowAXFrame(
+            startWindowAXFrame: start,
+            edge: .right,
+            deltaAX: CGSize(width: -700, height: 0),
+            minWindowTopAX: minTop
+        )
+        #expect(rightShrinkClamped == CGRect(x: 200, y: 180, width: 260, height: 600))
+
+        // Top resize keeps maxY (780) fixed and clamps both above minWindowTopAX and below minHeight
+        let topGrowClamped = WindowChromeGeometry.resizedWindowAXFrame(
+            startWindowAXFrame: start,
+            edge: .top,
+            deltaAX: CGSize(width: 0, height: -200),
+            minWindowTopAX: minTop
+        )
+        #expect(topGrowClamped == CGRect(x: 200, y: 66, width: 800, height: 714))
+
+        let topShrinkClamped = WindowChromeGeometry.resizedWindowAXFrame(
+            startWindowAXFrame: start,
+            edge: .top,
+            deltaAX: CGSize(width: 0, height: 550),
+            minWindowTopAX: minTop
+        )
+        #expect(topShrinkClamped == CGRect(x: 200, y: 620, width: 800, height: 160))
+
+        // Top-right corner moves top and right together
+        let topRight = WindowChromeGeometry.resizedWindowAXFrame(
+            startWindowAXFrame: start,
+            edge: .topRight,
+            deltaAX: CGSize(width: 120, height: -30),
+            minWindowTopAX: minTop
+        )
+        #expect(topRight == CGRect(x: 200, y: 150, width: 920, height: 630))
+    }
 }

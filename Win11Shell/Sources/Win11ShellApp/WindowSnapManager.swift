@@ -19,6 +19,20 @@ public final class WindowSnapManager {
 
     public var onWindowFrameChanged: (() -> Void)?
     public var suppressGlobalDragMonitor: Bool = false
+    public var currentPreviewZone: WindowSnapZone? { activePreviewZone }
+    public var currentPreviewScreen: NSScreen? { activePreviewScreen }
+
+    public func targetAXFrame(for zone: WindowSnapZone, on screen: NSScreen) -> CGRect {
+        WindowChromeGeometry.snapAXFrame(
+            for: zone,
+            screenFrameCocoa: screen.frame,
+            visibleFrameCocoa: screen.visibleFrame,
+            primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
+            barHeight: CGFloat(model.config.windowBarHeight),
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
+        )
+    }
 
     public init(model: RunningAppsModel) {
         self.model = model
@@ -102,15 +116,7 @@ public final class WindowSnapManager {
             savedRestoreFrames[key] = win.axFrame
         }
 
-        let targetAX = WindowChromeGeometry.snapAXFrame(
-            for: zone,
-            screenFrameCocoa: screen.frame,
-            visibleFrameCocoa: screen.visibleFrame,
-            primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
-            barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight),
-            safeAreaTopInset: screen.safeAreaInsets.top
-        )
+        let targetAX = targetAXFrame(for: zone, on: screen)
         AccessibilityBridge.setFrame(win.element, axFrame: targetAX)
         cancelDragPreview()
         onWindowFrameChanged?()
@@ -284,15 +290,7 @@ public final class WindowSnapManager {
 
     private func showPreviewOverlay(for zone: WindowSnapZone, on screen: NSScreen) {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
-        let axRect = WindowChromeGeometry.snapAXFrame(
-            for: zone,
-            screenFrameCocoa: screen.frame,
-            visibleFrameCocoa: screen.visibleFrame,
-            primaryScreenHeight: primaryH,
-            barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight),
-            safeAreaTopInset: screen.safeAreaInsets.top
-        )
+        let axRect = targetAXFrame(for: zone, on: screen)
         let cocoaRect = WindowChromeGeometry.axRectToCocoa(axRect, primaryScreenHeight: primaryH)
         let insetRect = cocoaRect.insetBy(dx: 6, dy: 6)
 
@@ -339,7 +337,7 @@ public final class WindowSnapManager {
     }
 
     private func handleGlobalMouseDown() {
-        guard !suppressGlobalDragMonitor else { return }
+        guard !suppressGlobalDragMonitor, !model.config.showWindowChromeBar else { return }
         dragCandidateWindow = nil
         dragCandidateBundleID = ""
         dragStartFrame = .zero
@@ -364,7 +362,7 @@ public final class WindowSnapManager {
     }
 
     private func handleGlobalMouseDragged() {
-        guard !suppressGlobalDragMonitor, let candidate = dragCandidateWindow else { return }
+        guard !suppressGlobalDragMonitor, !model.config.showWindowChromeBar, let candidate = dragCandidateWindow else { return }
 
         if !dragSawWindowMove {
             guard let live = AccessibilityBridge.windowInfo(for: candidate.element, pid: candidate.pid) else {
@@ -387,7 +385,7 @@ public final class WindowSnapManager {
     }
 
     private func handleGlobalMouseUp() {
-        guard !suppressGlobalDragMonitor else { return }
+        guard !suppressGlobalDragMonitor, !model.config.showWindowChromeBar else { return }
         defer {
             dragCandidateWindow = nil
             dragCandidateBundleID = ""

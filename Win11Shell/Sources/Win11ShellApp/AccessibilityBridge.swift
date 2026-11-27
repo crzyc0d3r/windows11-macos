@@ -148,16 +148,21 @@ public enum AccessibilityBridge {
     }
 
     public static func focusWindow(_ info: AXWindowInfo) {
+        let appEl = AXUIElementCreateApplication(info.pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.25)
+        AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
+        AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+
         if let app = NSRunningApplication(processIdentifier: info.pid) {
             if app.isHidden {
+                app.unhide()
+            } else {
                 app.unhide()
             }
             app.activate(options: [.activateAllWindows])
         }
         AXUIElementSetMessagingTimeout(info.element, 0.25)
-        if info.isMinimized {
-            AXUIElementSetAttributeValue(info.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-        }
+        AXUIElementSetAttributeValue(info.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         AXUIElementPerformAction(info.element, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(info.element, kAXMainAttribute as CFString, kCFBooleanTrue)
     }
