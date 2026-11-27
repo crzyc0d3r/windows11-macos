@@ -1,0 +1,432 @@
+import AppKit
+import ApplicationServices
+import Foundation
+@preconcurrency import ScreenCaptureKit
+import Win11ShellCore
+
+// Private AX helper to extract CGWindowID when available
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
+public struct AXWindowInfo: @unchecked Sendable {
+    public let pid: pid_t
+    public let windowID: CGWindowID
+    public let title: String
+    public let axFrame: CGRect
+    public let isMinimized: Bool
+    public let isFullScreen: Bool
+    public let element: AXUIElement
+}
+
+public struct MirroredMenuItem: @unchecked Sendable {
+    public let title: String
+    public let isEnabled: Bool
+    public let isSeparator: Bool
+    public let markChar: String?
+    public let keyEquivalent: String?
+    public let element: AXUIElement
+    public let children: [MirroredMenuItem]
+}
+
+public struct TrayExtraItem: @unchecked Sendable, Identifiable {
+    public var id: String { "\(pid)-\(index)-\(title)" }
+    public let pid: pid_t
+    public let index: Int
+    public let appName: String
+    public let bundleID: String
+    public let title: String
+    public let icon: NSImage?
+    public let element: AXUIElement
+}
+
+@MainActor
+public enum AccessibilityBridge {
+    public static func hasAccessibilityPermission(prompt: Bool = false) -> Bool {
+        let key = "AXTrustedCheckOptionPrompt" as CFString
+        let opts = [key: prompt] as CFDictionary
+        return AXIsProcessTrustedWithOptions(opts)
+    }
+
+    public static func hasInputMonitoringPermission() -> Bool {
+        CGPreflightListenEventAccess()
+    }
+
+    public static func hasScreenRecordingPermission() -> Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    public static func primaryScreenHeight() -> CGFloat {
+        if let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) {
+            return primary.frame.height
+        }
+        return NSScreen.screens.first?.frame.height ?? 900
+    }
+
+    public static func screenContaining(axFrame: CGRect) -> NSScreen? {
+        let primaryH = primaryScreenHeight()
+        let cocoaRect = WindowChromeGeometry.axRectToCocoa(axFrame, primaryScreenHeight: primaryH)
+        let center = CGPoint(x: cocoaRect.midX, y: cocoaRect.midY)
+        if let match = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+            return match
+        }
+        return NSScreen.screens.max { a, b in
+            a.frame.intersection(cocoaRect).area < b.frame.intersection(cocoaRect).area
+        } ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    public static func focusedWindow(for pid: pid_t) -> AXWindowInfo? {
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.25)
+
+        var focusedRef: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &focusedRef)
+        guard err == .success, let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else {
+            return standardWindows(for: pid).first
+        }
+        let winEl = focusedRef as! AXUIElement
+        return windowInfo(for: winEl, pid: pid)
+    }
+
+    public static func standardWindows(for pid: pid_t) -> [AXWindowInfo] {
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.25)
+
+        var listRef: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &listRef)
+        guard err == .success, let elements = listRef as? [AXUIElement] else {
+            return []
+        }
+
+        return elements.compactMap { windowInfo(for: $0, pid: pid, requireStandardRole: true) }
+    }
+
+    public static func windowInfo(
+        for element: AXUIElement,
+        pid: pid_t,
+        requireStandardRole: Bool = false
+    ) -> AXWindowInfo? {
+        AXUIElementSetMessagingTimeout(element, 0.25)
+
+        if requireStandardRole {
+            let role = stringAttribute(element, kAXRoleAttribute)
+            let subrole = stringAttribute(element, kAXSubroleAttribute)
+            if role != (kAXWindowRole as String) {
+                return nil
+            }
+            if let subrole, subrole != (kAXStandardWindowSubrole as String) {
+                return nil
+            }
+        }
+
+        guard let frame = rectAttribute(element) else {
+            return nil
+        }
+
+        var wid: CGWindowID = 0
+        _ = _AXUIElementGetWindow(element, &wid)
+
+        let title = stringAttribute(element, kAXTitleAttribute) ?? ""
+        let isMinimized = boolAttribute(element, kAXMinimizedAttribute) ?? false
+        let isFullScreen = boolAttribute(element, "AXFullScreen") ?? false
+
+        return AXWindowInfo(
+            pid: pid,
+            windowID: wid,
+            title: title,
+            axFrame: frame,
+            isMinimized: isMinimized,
+            isFullScreen: isFullScreen,
+            element: element
+        )
+    }
+
+    public static func focusWindow(_ info: AXWindowInfo) {
+        if let app = NSRunningApplication(processIdentifier: info.pid) {
+            if app.isHidden {
+                app.unhide()
+            }
+            app.activate(options: [.activateAllWindows])
+        }
+        AXUIElementSetMessagingTimeout(info.element, 0.25)
+        if info.isMinimized {
+            AXUIElementSetAttributeValue(info.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+        }
+        AXUIElementPerformAction(info.element, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(info.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+    }
+
+    public static func setMinimized(_ element: AXUIElement, minimized: Bool) {
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        AXUIElementSetAttributeValue(
+            element,
+            kAXMinimizedAttribute as CFString,
+            minimized ? kCFBooleanTrue : kCFBooleanFalse
+        )
+    }
+
+    public static func setFrame(_ element: AXUIElement, axFrame: CGRect) {
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        var pos = axFrame.origin
+        var size = axFrame.size
+        if let posVal = AXValueCreate(.cgPoint, &pos) {
+            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
+        }
+        if let sizeVal = AXValueCreate(.cgSize, &size) {
+            AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeVal)
+        }
+    }
+
+    public static func setPosition(_ element: AXUIElement, origin: CGPoint) {
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        var pos = origin
+        if let posVal = AXValueCreate(.cgPoint, &pos) {
+            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
+        }
+    }
+
+    @discardableResult
+    public static func pressCloseButton(_ element: AXUIElement) -> Bool {
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        var closeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &closeRef) == .success,
+              let closeRef,
+              CFGetTypeID(closeRef) == AXUIElementGetTypeID()
+        else {
+            return false
+        }
+        let closeEl = closeRef as! AXUIElement
+        AXUIElementSetMessagingTimeout(closeEl, 0.25)
+        return AXUIElementPerformAction(closeEl, kAXPressAction as CFString) == .success
+    }
+
+    public static func performPress(_ element: AXUIElement) {
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        AXUIElementPerformAction(element, kAXPressAction as CFString)
+    }
+
+    // MARK: - Live Menu Bar Mirroring
+
+    public static func readAppMenuBar(pid: pid_t) -> [MirroredMenuItem] {
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.25)
+
+        var menuBarRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appEl, kAXMenuBarAttribute as CFString, &menuBarRef) == .success,
+              let menuBarRef,
+              CFGetTypeID(menuBarRef) == AXUIElementGetTypeID()
+        else {
+            return []
+        }
+
+        let menuBarEl = menuBarRef as! AXUIElement
+        let topItems = childElements(of: menuBarEl)
+        // Skip index 0 (Apple menu) when its title is "Apple" or empty
+        var results: [MirroredMenuItem] = []
+        for (idx, itemEl) in topItems.enumerated() {
+            let title = stringAttribute(itemEl, kAXTitleAttribute) ?? ""
+            if idx == 0 && (title == "Apple" || title.isEmpty) {
+                continue
+            }
+            if title.isEmpty { continue }
+            results.append(MirroredMenuItem(
+                title: title,
+                isEnabled: boolAttribute(itemEl, kAXEnabledAttribute) ?? true,
+                isSeparator: false,
+                markChar: nil,
+                keyEquivalent: nil,
+                element: itemEl,
+                children: []
+            ))
+        }
+        return results
+    }
+
+    public static func readMenuChildren(of menuBarItem: AXUIElement, maxDepth: Int = 2) -> [MirroredMenuItem] {
+        guard maxDepth > 0 else { return [] }
+        AXUIElementSetMessagingTimeout(menuBarItem, 0.25)
+        let children = childElements(of: menuBarItem)
+        guard let menuEl = children.first(where: { stringAttribute($0, kAXRoleAttribute) == (kAXMenuRole as String) })
+            ?? (stringAttribute(menuBarItem, kAXRoleAttribute) == (kAXMenuRole as String) ? menuBarItem : nil)
+        else {
+            return []
+        }
+
+        let itemElements = childElements(of: menuEl)
+        var items: [MirroredMenuItem] = []
+        for el in itemElements {
+            let title = stringAttribute(el, kAXTitleAttribute) ?? ""
+            let role = stringAttribute(el, kAXRoleAttribute) ?? ""
+            if role == "AXSeparatorMenuItem" || title.isEmpty {
+                items.append(MirroredMenuItem(
+                    title: "",
+                    isEnabled: false,
+                    isSeparator: true,
+                    markChar: nil,
+                    keyEquivalent: nil,
+                    element: el,
+                    children: []
+                ))
+                continue
+            }
+            let enabled = boolAttribute(el, kAXEnabledAttribute) ?? true
+            let mark = stringAttribute(el, kAXMenuItemMarkCharAttribute)
+            let cmdChar = stringAttribute(el, kAXMenuItemCmdCharAttribute)
+            let subChildren = readMenuChildren(of: el, maxDepth: maxDepth - 1)
+            items.append(MirroredMenuItem(
+                title: title,
+                isEnabled: enabled,
+                isSeparator: false,
+                markChar: mark,
+                keyEquivalent: cmdChar,
+                element: el,
+                children: subChildren
+            ))
+        }
+        return items
+    }
+
+    public static func buildNSMenu(from items: [MirroredMenuItem], target: AnyObject, action: Selector) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items {
+            if item.isSeparator {
+                menu.addItem(.separator())
+                continue
+            }
+            let keyEq = item.keyEquivalent?.lowercased() ?? ""
+            let menuItem = NSMenuItem(title: item.title, action: item.children.isEmpty ? action : nil, keyEquivalent: keyEq)
+            menuItem.target = item.children.isEmpty ? target : nil
+            menuItem.isEnabled = item.isEnabled
+            menuItem.representedObject = item.element
+            if item.markChar == "✓" {
+                menuItem.state = .on
+            }
+            if !item.children.isEmpty {
+                menuItem.submenu = buildNSMenu(from: item.children, target: target, action: action)
+            }
+            menu.addItem(menuItem)
+        }
+        return menu
+    }
+
+    // MARK: - Third-Party Top-Right Menu Bar Extras Mirroring
+
+    public static func readTrayExtras(excludingBundleIDs: Set<String>) -> [TrayExtraItem] {
+        var extras: [TrayExtraItem] = []
+        for app in NSWorkspace.shared.runningApplications {
+            guard let bundleID = app.bundleIdentifier,
+                  !excludingBundleIDs.contains(bundleID),
+                  !bundleID.hasPrefix("com.apple.controlcenter"),
+                  bundleID != "com.apple.Spotlight",
+                  bundleID != "com.apple.systemuiserver"
+            else {
+                continue
+            }
+
+            let appEl = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(appEl, 0.15)
+            var extrasRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(appEl, kAXExtrasMenuBarAttribute as CFString, &extrasRef) == .success,
+                  let extrasRef,
+                  CFGetTypeID(extrasRef) == AXUIElementGetTypeID()
+            else {
+                continue
+            }
+
+            let barEl = extrasRef as! AXUIElement
+            let children = childElements(of: barEl)
+            for (idx, child) in children.enumerated() {
+                let title = stringAttribute(child, kAXTitleAttribute)
+                    ?? stringAttribute(child, kAXDescriptionAttribute)
+                    ?? app.localizedName
+                    ?? bundleID
+                extras.append(TrayExtraItem(
+                    pid: app.processIdentifier,
+                    index: idx,
+                    appName: app.localizedName ?? bundleID,
+                    bundleID: bundleID,
+                    title: title,
+                    icon: app.icon,
+                    element: child
+                ))
+            }
+        }
+        return extras
+    }
+
+    // MARK: - Live Window Thumbnail (ScreenCaptureKit)
+
+    public static func captureWindowThumbnail(windowID: CGWindowID) async -> NSImage? {
+        guard windowID != 0, hasScreenRecordingPermission() else {
+            return nil
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let scWindow = content.windows.first(where: { $0.windowID == windowID }) else {
+                return nil
+            }
+            let filter = SCContentFilter(desktopIndependentWindow: scWindow)
+            let config = SCStreamConfiguration()
+            let scale = min(1.0, 260.0 / max(1.0, scWindow.frame.width))
+            config.width = max(120, Int(scWindow.frame.width * scale))
+            config.height = max(80, Int(scWindow.frame.height * scale))
+            config.showsCursor = false
+            let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            return NSImage(cgImage: cgImage, size: NSSize(width: config.width, height: config.height))
+        } catch {
+            return nil
+        }
+    }
+
+    // MARK: - Attribute Helpers
+
+    private static func childElements(of element: AXUIElement) -> [AXUIElement] {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
+              let list = ref as? [AXUIElement]
+        else {
+            return []
+        }
+        return list
+    }
+
+    private static func stringAttribute(_ element: AXUIElement, _ attr: String) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success else {
+            return nil
+        }
+        return ref as? String
+    }
+
+    private static func boolAttribute(_ element: AXUIElement, _ attr: String) -> Bool? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success else {
+            return nil
+        }
+        return ref as? Bool
+    }
+
+    private static func rectAttribute(_ element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef, let sizeRef,
+              CFGetTypeID(posRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeRef) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        AXValueGetValue(posRef as! AXValue, .cgPoint, &point)
+        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        return CGRect(origin: point, size: size)
+    }
+}
+
+private extension CGRect {
+    var area: CGFloat {
+        isNull || isEmpty ? 0 : width * height
+    }
+}

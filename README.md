@@ -86,3 +86,40 @@ defaults write -g NSFileViewer -string com.hackedple.fileexplorer && killall Fin
 # Revert:
 defaults delete -g NSFileViewer && killall Finder
 ```
+
+
+---
+
+## Full Windows 11 Desktop Environment (`Win11Shell` + `./up` & `./down`)
+
+This repository also includes `Win11Shell/` (`com.hackedple.win11shell`), a native Swift 6 Windows 11 desktop shell that works alongside `FileExplorer.app`:
+
+- **Windows 11 Taskbar & Start Menu**: Full-width 48pt bottom Taskbar (pinned & running apps, live hover window previews, Jump Lists, Widgets chip, `^` System Tray overflow mirroring top-right macOS extras, Quick Settings for Wi-Fi/Volume/Brightness/Battery/Dark Mode, Clock/Calendar flyout, Show Desktop sliver, Taskbar Settings), plus a Windows 11 Start Menu with live app/file search and Power menu.
+- **Per-Window Self-Contained Menu Bar + Right-Side Controls (`— □ ✕`)**: Docked 28pt bar above the focused window with live mirrored `File | Edit | View...` menus, drag-to-move, double-click maximize, Snap Layouts hover picker on `□`, and Windows 11 quit-on-last-window `✕` (keeping background tray apps alive).
+- **Finder, Dock & Top Menu Bar Suppression**: Sets `FileExplorer.app` as `NSFileViewer`, hides Apple's Dock and Finder desktop, auto-hides the macOS top Menu Bar, and intercepts Finder activations.
+- **Windows 11 Keyboard & Windowing**: Integrates Karabiner-Elements (`[Ctrl | Win | Alt]` physical layout on both MacBook and external keyboards, `Ctrl→Cmd` in non-terminal apps, raw `Ctrl` in terminals, `Win` tap for Start Menu, `Win+E/D/S/A/N/I/L/Tab/Shift+S/.`, `Ctrl+Shift+Esc`, `Alt+F4`, `Win+Ctrl+Arrows`, `Win+Arrows`), AltTab (`Alt+Tab`), and Rectangle (snap-on-drag with 28pt top / 48pt bottom gaps).
+
+### Initialize & Restore
+
+```bash
+# Enable the full Windows 11 environment (snapshots original macOS settings first)
+./up
+
+# Restore original macOS (Dock, top Menu Bar, Finder, Karabiner, Rectangle, AltTab)
+./down
+```
+
+Optional flags:
+- `./up --dry-run` / `./down --dry-run` — preview actions without changing system state
+- `./up --rebuild` — force rebuilding `FileExplorer.app` and `Win11Shell.app`
+- `./up --skip-brew` — skip Homebrew cask installs (`karabiner-elements`, `alt-tab`, `rectangle`)
+- `./down --keep-apps` — keep `/Applications/FileExplorer.app` and `/Applications/Win11Shell.app`
+- `./down --uninstall-brew` — also uninstall Homebrew casks newly installed by `./up`
+
+### Build & Test `Win11Shell`
+
+```bash
+cd Win11Shell && swift test
+./scripts/build-win11shell.sh
+./build/Win11Shell.app/Contents/MacOS/Win11ShellApp --smoke-test
+```
