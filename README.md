@@ -1,125 +1,187 @@
-# File Explorer for macOS
+# Windows 11 for macOS
 
-A native macOS desktop file manager inspired by **Windows 11 (24H2) File Explorer**, built in **Swift 6** with **SwiftUI** and **AppKit**.
+A **full native Windows 11 desktop shell replacement for macOS**, built in **Swift 6** (**SwiftUI** + **AppKit**) and integrated with **Karabiner-Elements**, **AltTab**, **Rectangle**, and a native **Windows 11 (24H2) File Explorer** (`FileExplorer.app`).
 
-## Features
-
-- **Windows 11 Fluent Chrome & Mica Surfaces**: Browser-style tab strip with drag-and-drop reordering and window tear-off, 44px address bar with interactive breadcrumbs, sibling folder menus, editable path mode (`Cmd+L`), and instant scoped search.
-- **8 Layout Modes & Grouping**: Extra large / Large / Medium / Small icons, List, Details (resizable sortable columns), Tiles, and Content views, with collapsible Group By sections and optional item checkboxes.
-- **Dedicated Destinations**: Home (Quick Access, Favorites, Recent), This Mac (folders & drives with capacity bars), Gallery (chronological photo timeline with year/month scrubber), Network discovery, and Trash (enumerate, restore, empty).
-- **Rich Inspector & Dialogs**: Details pane, Preview pane (Images, PDFs, Text/Code/JSON/Markdown, Quick Look), Windows 11 24H2 Context Menu with Top Action Bar, Properties dialog (`General`, `Security` interactive `chmod` POSIX permissions, `Details`), Conflict Resolution dialog, and Folder Options & Appearance modal.
-- **Real Filesystem Engine**: Live `DispatchSource` directory watching, async copy/move with progress & conflict resolution, `/usr/bin/ditto` ZIP compress & extract, Undo/Redo stack, bidirectional `NSPasteboard` cut/copy/paste, and JSON persistence under `~/Library/Application Support/FileExplorer/`.
-
-## Requirements
-
-- macOS 15.0+ (Apple Silicon / Intel)
-- Swift 6.0+ / Xcode 16+
-
-## Build, Test & Run
-
-```bash
-# Build all targets
-swift build
-
-# Run unit tests
-swift test
-
-# Run the app directly
-swift run FileExplorerApp
-
-# Run CLI smoke test
-swift run FileExplorerApp --smoke-test
-
-# Generate 10 Retina (1440x900 @2x) snapshot PNGs
-swift run FileExplorerApp --snapshot-dir ./snapshots
-```
-
-### Build `.app` Bundle
-
-```bash
-chmod +x scripts/build-app.sh
-./scripts/build-app.sh
-open build/FileExplorer.app
-```
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|---|---|
-| `Cmd+T` | New Tab |
-| `Cmd+W` | Close Tab |
-| `Cmd+N` | New Window |
-| `Cmd+Shift+N` | New Folder |
-| `Cmd+L` | Edit Path / Address Bar |
-| `Cmd+F` | Focus Search |
-| `Cmd+[` / `Cmd+]` | Back / Forward |
-| `Cmd+Up` / `Backspace` | Up One Level |
-| `Enter` | Open Selected Item |
-| `F2` | Rename Selected Item |
-| `Space` | Toggle Quick Look |
-| `Cmd+I` | Properties Dialog |
-| `Cmd+X` / `Cmd+C` / `Cmd+V` | Cut / Copy / Paste |
-| `Cmd+D` | Duplicate |
-| `Cmd+A` | Select All |
-| `Cmd+Z` / `Cmd+Shift+Z` | Undo / Redo |
-| `Cmd+Delete` | Move to Trash |
-| `Cmd+Shift+.` | Toggle Hidden Files |
-| `Cmd+R` | Refresh |
-| `Cmd+,` | Folder Options & Appearance |
-
-## Set as Default macOS File Viewer (`NSFileViewer`)
-
-Use the included `sudo` helper scripts to install/enable File Explorer as your default folder viewer (`up.sh`) or cleanly restore macOS Finder (`down.sh`):
-
-```bash
-# Install to /Applications, set NSFileViewer, restart Finder, and launch File Explorer
-sudo ./scripts/up.sh          # pass --rebuild to force rebuilding build/FileExplorer.app
-
-# Quit File Explorer, restore Finder defaults, remove /Applications/FileExplorer.app, and relaunch Finder
-sudo ./scripts/down.sh        # pass --keep-app to leave /Applications/FileExplorer.app installed
-```
-
-Or manage the `NSFileViewer` default manually after copying `build/FileExplorer.app` to `/Applications`:
-
-```bash
-defaults write -g NSFileViewer -string com.hackedple.fileexplorer && killall Finder
-# Revert:
-defaults delete -g NSFileViewer && killall Finder
-```
-
+Designed to run with **System Integrity Protection (SIP) enabled** and switch cleanly between native macOS and the full Windows 11 environment using `./up` and `./down`.
 
 ---
 
-## Full Windows 11 Desktop Environment (`Win11Shell` + `./up` & `./down`)
-
-This repository also includes `Win11Shell/` (`com.hackedple.win11shell`), a native Swift 6 Windows 11 desktop shell that works alongside `FileExplorer.app`:
-
-- **Windows 11 Taskbar & Start Menu**: Full-width 48pt bottom Taskbar (pinned & running apps, live hover window previews, Jump Lists, Widgets chip, `^` System Tray overflow mirroring top-right macOS extras, Quick Settings for Wi-Fi/Volume/Brightness/Battery/Dark Mode, Clock/Calendar flyout, Show Desktop sliver, Taskbar Settings), plus a Windows 11 Start Menu with live app/file search and Power menu.
-- **Per-Window Self-Contained Menu Bar + Right-Side Controls (`— □ ✕`)**: Docked 28pt bar above the focused window with live mirrored `File | Edit | View...` menus, drag-to-move, double-click maximize, Snap Layouts hover picker on `□`, and Windows 11 quit-on-last-window `✕` (keeping background tray apps alive).
-- **Finder, Dock & Top Menu Bar Suppression**: Sets `FileExplorer.app` as `NSFileViewer`, hides Apple's Dock and Finder desktop, auto-hides the macOS top Menu Bar, and intercepts Finder activations.
-- **Windows 11 Keyboard & Windowing**: Integrates Karabiner-Elements (`[Ctrl | Win | Alt]` physical layout on both MacBook and external keyboards, `Ctrl→Cmd` in non-terminal apps, raw `Ctrl` in terminals, `Win` tap for Start Menu, `Win+E/D/S/A/N/I/L/Tab/Shift+S/.`, `Ctrl+Shift+Esc`, `Alt+F4`, `Win+Ctrl+Arrows`, `Win+Arrows`), AltTab (`Alt+Tab`), and Rectangle (snap-on-drag with 28pt top / 48pt bottom gaps).
-
-### Initialize & Restore
+## Quick Start (`./up` & `./down`)
 
 ```bash
-# Enable the full Windows 11 environment (snapshots original macOS settings first)
+# Enable the full Windows 11 desktop shell (snapshots your macOS settings first)
 ./up
 
 # Restore original macOS (Dock, top Menu Bar, Finder, Karabiner, Rectangle, AltTab)
 ./down
 ```
 
-Optional flags:
-- `./up --dry-run` / `./down --dry-run` — preview actions without changing system state
-- `./up --rebuild` — force rebuilding `FileExplorer.app` and `Win11Shell.app`
-- `./up --skip-brew` — skip Homebrew cask installs (`karabiner-elements`, `alt-tab`, `rectangle`)
-- `./down --keep-apps` — keep `/Applications/FileExplorer.app` and `/Applications/Win11Shell.app`
-- `./down --uninstall-brew` — also uninstall Homebrew casks newly installed by `./up`
+### Supported Script Flags
 
-### Build & Test `Win11Shell`
+| Command | Effect |
+|---|---|
+| `./up --dry-run` | Preview every `./up` action without modifying system defaults or apps |
+| `./up --rebuild` | Force rebuilding `FileExplorer.app` and `Win11Shell.app` before installing |
+| `./up --skip-brew` | Skip Homebrew cask installation (`karabiner-elements`, `alt-tab`, `rectangle`) |
+| `./down --dry-run` | Preview every `./down` restore action without changing system state |
+| `./down --keep-apps` | Restore macOS while keeping `/Applications/FileExplorer.app` and `/Applications/Win11Shell.app` |
+| `./down --uninstall-brew` | Also uninstall Homebrew casks that were newly installed by `./up` |
+
+*(Compatibility wrappers `scripts/up.sh` and `scripts/down.sh` delegate directly to `./up` and `./down`.)*
+
+### What `./up` Snapshots & `./down` Restores
+
+On first run, `./up` saves a one-time backup snapshot to `~/Library/Application Support/HackedpleWin11/backup/` covering:
+- `com.apple.dock.plist` & `com.apple.finder.plist` (`CreateDesktop`, `QuitMenuItem`)
+- Global defaults (`_HIHideMenuBar`, `NSFileViewer`)
+- Existing Karabiner-Elements config (`~/.config/karabiner/karabiner.json`)
+- Existing Rectangle (`com.knollsoft.Rectangle`) and AltTab (`com.lwouis.alt-tab-macos`) preferences
+- Newly installed Homebrew casks (`installed-casks.txt`) and the `Win11Shell` LaunchAgent (`~/Library/LaunchAgents/com.hackedple.win11shell.plist`)
+
+### One-Time macOS Permissions Checklist
+
+After running `./up` the first time, grant these permissions in **System Settings → Privacy & Security** so global hotkeys, window bars, and live thumbnails work everywhere:
+1. **Accessibility**: Enable `Win11Shell`, `AltTab`, and `Rectangle`
+2. **Input Monitoring**: Enable `Win11Shell` and `karabiner_grabber`
+3. **Screen Recording**: Enable `Win11Shell` and `AltTab` (used for live taskbar & `Alt+Tab` window thumbnails)
+4. **Driver Extensions**: Allow the **Karabiner-Elements** DriverKit extension if prompted
+
+---
+
+## Shell Architecture & Features
+
+### 1. Windows 11 Taskbar & System Tray (`Win11Shell.app`)
+A full-width **48pt Acrylic/Mica taskbar** rendered per display (replaces Apple's hidden Dock, supports fullscreen auto-hide and optional taskbar auto-hide):
+- **Center or Left Alignment**: Start button, Search (`Win+S`), Task View (`Win+Tab`), and pinned/running app icons (`FileExplorer` pinned first; Finder hidden).
+- **Taskbar Interactions**: Active accent pill, left-click active app to minimize/hide, middle-click to open a new window, **live hover window previews** with per-window close (`✕`), and right-click Jump Lists (New Window, open windows, Pin/Unpin, Quit).
+- **Widgets & System Stats Chip**: Live CPU load and memory usage badge opening a System & Widgets flyout.
+- **`^` System Tray Overflow**: Mirrors third-party top-right macOS menu bar extras (`AXExtrasMenuBar`) into a bottom tray popover alongside Activity Monitor (Task Manager) and System Settings shortcuts.
+- **Quick Settings Flyout (`Win+A`)**: Interactive Wi-Fi toggle/SSID, Bluetooth, Dark/Light mode, Hide Top Menu Bar, Auto-Hide Taskbar, Per-Window Menu Bar toggle, Display Brightness slider, Volume slider + mute, and Battery status.
+- **Clock & Calendar Flyout (`Win+N`)**: Live clock, date, and interactive month calendar grid.
+- **Show Desktop Sliver (`Win+D`)** & **Taskbar Settings** right-click menu.
+
+### 2. Windows 11 Start Menu (`Win` / Start Button)
+- Live prefix-ranked app search (`Enter` launches top match)
+- 6-column **Pinned** apps grid with Pin/Unpin context actions and **All Apps** alphabetical list
+- **Recommended** recent files from `~/Desktop`, `~/Downloads`, and `~/Documents`
+- User profile badge and **Power** menu (`Lock`, `Sleep`, `Restart`, `Shut down`, `Sign out`)
+
+### 3. Per-Window Self-Contained Menu Bar & Right-Side Controls (`— □ ✕`)
+Because SIP prevents injecting views into other apps' native macOS titlebars, `Win11Shell` docks a **28pt bar flush above the focused window** (reserving `28pt` at the top and `48pt` at the bottom when maximizing):
+- **Live Mirrored App Menus**: Reads the active app's `AXMenuBar` (`File`, `Edit`, `View`, etc., collapsing overflow into `•••`) so every window has its own self-contained Windows-style menu bar while macOS's top menu bar stays hidden.
+- **Window Dragging & Double-Click Maximize**: Drag the strip to move any window; double-click to maximize/restore.
+- **Right-Side Caption Buttons (`— □ ✕`)**:
+  - `—` Minimize window
+  - `□` / `❐` Maximize/Restore + **Windows 11 Snap Layouts** hover picker (`50/50`, `66/34`, quadrants)
+  - `✕` Close window / **quit app on last window** (keeping background tray apps like Outlook, Teams, WhatsApp, OneDrive, and Tailscale alive)
+
+### 4. macOS Dock, Top Menu Bar & Finder Suppression
+- Hides Apple's native Dock (`autohide=true`, `autohide-delay=1000`, `autohide-time-modifier=0`, `no-bouncing=true`).
+- Auto-hides the macOS top Menu Bar (`_HIHideMenuBar=true`) and consolidates system controls and tray icons into the bottom Taskbar.
+- Sets `FileExplorer.app` (`com.hackedple.fileexplorer`) as the default folder handler (`NSFileViewer`), disables Finder desktop (`CreateDesktop=false`), enables `QuitMenuItem`, and intercepts Finder activations at runtime to redirect straight to `FileExplorer.app`.
+
+### 5. Windows 11 (24H2) File Explorer (`FileExplorer.app`)
+- **Fluent Chrome & Mica Surfaces**: Browser-style tab strip with drag-and-drop reordering and window tear-off, 44px address bar with interactive breadcrumbs, editable path bar, and instant scoped search.
+- **8 Layout Modes & Grouping**: Extra large / Large / Medium / Small icons, List, Details (resizable sortable columns), Tiles, and Content views, with collapsible Group By sections and optional item checkboxes.
+- **Destinations & Inspector**: Home, This Mac (drives with capacity bars), Gallery, Network, Trash, Details pane, Preview pane (Images, PDFs, Text/Code/JSON/Markdown, Quick Look), Properties (`General`, `Security` `chmod`, `Details`), and Conflict Resolution dialogs.
+- **Real Filesystem Engine**: Live `DispatchSource` watching, async copy/move, `/usr/bin/ditto` ZIP compress & extract, Undo/Redo stack, and bidirectional `NSPasteboard` cut/copy/paste.
+
+---
+
+## Keyboard & Window Management
+
+### Modifier Layout
+On the built-in MacBook keyboard, Karabiner swaps `Option ↔ Command` at the device layer so **both the built-in keyboard and external PC keyboards share identical physical positions**:
+
+```text
+[ Ctrl ] [ Win ] [ Alt ] [ Space ]
+```
+
+- **Non-terminal apps**: `Ctrl+<key>` shortcuts map to macOS `Cmd+<key>` (`Ctrl+C`, `Ctrl+V`, `Ctrl+X`, `Ctrl+Z`, `Ctrl+Y` → Redo, `Ctrl+F`, `Ctrl+T`, `Ctrl+W`, etc.), while `Ctrl+Tab` stays native for switching tabs.
+- **Terminal apps** (`Terminal`, `iTerm2`, `Ghostty`, `Warp`, `Alacritty`, `kitty`, `WezTerm`, `Hyper`): Raw `Ctrl` is preserved (`Ctrl+C` sends `SIGINT`); use `Win+C` / `Win+V` for copy/paste.
+
+### Global Windows 11 Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Win` (tap) | Toggle Windows 11 Start Menu |
+| `Win+S` | Open Start Menu focused on Search |
+| `Win+E` | Open / focus `FileExplorer.app` |
+| `Win+D` | Toggle Show Desktop |
+| `Win+A` | Toggle Quick Settings flyout |
+| `Win+N` | Toggle Clock & Calendar flyout |
+| `Win+I` | Open System Settings |
+| `Win+L` | Lock Screen (`Ctrl+Cmd+Q`) |
+| `Win+Tab` | Open Task View (Mission Control) |
+| `Win+Shift+S` | Interactive Snipping Tool (clipboard screenshot) |
+| `Win+.` | Emoji & Symbols picker |
+| `Ctrl+Shift+Esc` | Task Manager (Activity Monitor) |
+| `Alt+Tab` | Live-thumbnail window switcher (`AltTab`) |
+| `Alt+F4` | Close window / quit app on last window |
+| `Win+Left` / `Win+Right` / `Win+Up` | Snap window Left Half / Right Half / Maximize (`Rectangle`) |
+| `Win+Down` | Unmaximize window, or minimize if not maximized |
+| `Win+Ctrl+Left` / `Win+Ctrl+Right` | Switch Virtual Desktops (macOS Spaces) |
+| `Home` / `End` (and `+Shift`) | Line start / end |
+| `Ctrl+Home` / `Ctrl+End` (and `+Shift`) | Document start / end |
+| `Ctrl+Left` / `Ctrl+Right` (and `+Shift`) | Word jump / select |
+| `Alt+Left` / `Alt+Right` | Back / Forward |
+| `F5` / `Ctrl+F5` | Refresh / Hard Refresh |
+
+### File Explorer Shortcuts (`FileExplorer.app`)
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+T` / `Ctrl+W` / `Ctrl+N` | New Tab / Close Tab / New Window |
+| `Ctrl+Shift+N` | New Folder |
+| `Ctrl+L` / `Alt+D` | Edit Path / Address Bar |
+| `Ctrl+F` | Focus Search |
+| `Alt+Left` / `Alt+Right` | Back / Forward |
+| `Alt+Up` / `Backspace` | Up One Level |
+| `Enter` / `F2` / `Space` | Open / Rename / Quick Look |
+| `Alt+Enter` / `Ctrl+I` | Properties Dialog |
+| `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | Cut / Copy / Paste |
+| `Delete` | Move to Trash |
+| `Ctrl+H` | Toggle Hidden Files |
+| `F5` / `Ctrl+R` | Refresh |
+
+---
+
+## Repository Layout
+
+```text
+.
+├── up                              # Full Windows 11 environment initializer
+├── down                            # Full restore to original macOS
+├── Package.swift                   # FileExplorer Swift 6 package
+├── Sources/FileExplorer*           # Windows 11 File Explorer app modules
+├── Tests/FileExplorerCoreTests/    # FileExplorer unit tests
+├── Win11Shell/
+│   ├── Package.swift               # Win11Shell Swift 6 package
+│   ├── Sources/Win11ShellCore/     # Config, Karabiner/Rectangle/AltTab generators, geometry, close policy, app catalog
+│   ├── Sources/Win11ShellApp/      # Taskbar, Start Menu, Quick Settings, Calendar, Per-Window Bar, AX/Hotkey/Finder bridges
+│   └── Tests/Win11ShellCoreTests/  # Win11ShellCore unit tests
+└── scripts/
+    ├── build-app.sh                # Builds signed build/FileExplorer.app
+    ├── build-win11shell.sh         # Builds signed build/Win11Shell.app
+    ├── up.sh                       # Delegates to ../up
+    └── down.sh                     # Delegates to ../down
+```
+
+---
+
+## Requirements & Build / Test
+
+- **macOS 15.0+** (Apple Silicon / Intel)
+- **Swift 6.0+** / **Xcode 16+**
+- **Homebrew** (optional; used by `./up` to install `karabiner-elements`, `alt-tab`, and `rectangle`)
 
 ```bash
-cd Win11Shell && swift test
+# Test Win11ShellCore & build Win11Shell.app
+cd Win11Shell && swift test && cd ..
 ./scripts/build-win11shell.sh
 ./build/Win11Shell.app/Contents/MacOS/Win11ShellApp --smoke-test
+
+# Test FileExplorerCore & build FileExplorer.app
+swift test
+./scripts/build-app.sh
 ```
