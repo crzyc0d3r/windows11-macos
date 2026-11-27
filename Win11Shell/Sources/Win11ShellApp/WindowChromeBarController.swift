@@ -930,8 +930,21 @@ public final class WindowChromeBarController: NSObject {
 
         panel?.orderOut(nil)
         trafficLightMaskPanel?.orderOut(nil)
+        var didHide = false
         if let targetApp = NSRunningApplication(processIdentifier: pid) {
-            targetApp.hide()
+            let appHidden = targetApp.hide()
+            if targetApp.isHidden || appHidden {
+                didHide = true
+            }
+        }
+        if !didHide {
+            let appEl = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(appEl, 0.08)
+            if AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanTrue) == .success {
+                didHide = true
+            }
+        }
+        if didHide {
             hiddenDragAppPID = pid
         }
 
@@ -949,6 +962,9 @@ public final class WindowChromeBarController: NSObject {
         guard let pid = hiddenDragAppPID else { return }
         hiddenDragAppPID = nil
         NSRunningApplication(processIdentifier: pid)?.unhide()
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.08)
+        AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
     }
 
     nonisolated private func handleMouseTapCallback(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -1274,9 +1290,7 @@ public final class WindowChromeBarController: NSObject {
 
             panel?.orderOut(nil)
             trafficLightMaskPanel?.orderOut(nil)
-            if dragGhostState.snapshot != nil {
-                hideRealWindowForActiveDrag(pid: win.pid, windowID: win.windowID)
-            }
+            hideRealWindowForActiveDrag(pid: win.pid, windowID: win.windowID)
         }
 
         let targetWinX = (locationAX.x - dragGhostGrabOffsetAX.x).rounded()
@@ -1361,29 +1375,36 @@ public final class WindowChromeBarController: NSObject {
                     app.unhide()
                     app.activate(options: [.activateAllWindows])
                 }
+                let appEl = AXUIElementCreateApplication(hiddenPID)
+                AXUIElementSetMessagingTimeout(appEl, 0.08)
+                AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
             }
             if let win {
                 AccessibilityBridge.focusWindow(win)
-                if !didSnap,
-                   let live = AccessibilityBridge.liveWindowBounds(windowID: win.windowID),
-                   hypot(live.minX - finalAXFrame.minX, live.minY - finalAXFrame.minY) > 4
-                    || (wasMax && abs(live.width - finalAXFrame.width) > 12) {
-                    if wasMax {
-                        AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
-                    } else {
-                        AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                    guard !didSnap else { return }
+                    let liveFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
+                        ?? AccessibilityBridge.windowInfo(for: win.element, pid: win.pid)?.axFrame
+                    if let live = liveFrame,
+                       hypot(live.minX - finalAXFrame.minX, live.minY - finalAXFrame.minY) > 4
+                        || (wasMax && abs(live.width - finalAXFrame.width) > 12) {
+                        if wasMax {
+                            AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
+                        } else {
+                            AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
+                        }
                     }
                 }
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.045) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) { [weak self] in
                 guard let self else { return }
                 self.isDraggingTargetWindow = false
                 self.isFinishingDragDrop = false
                 self.syncActiveWindow()
                 self.dragGhostPanel?.orderOut(nil)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) { [weak self] in
                 self?.syncActiveWindow()
             }
         }

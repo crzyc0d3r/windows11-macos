@@ -531,7 +531,7 @@ public enum AccessibilityBridge {
         guard windowID != 0,
               windowAXFrame.width > 40,
               windowAXFrame.height > 40,
-              hasScreenRecordingPermission()
+              ProcessInfo.processInfo.systemUptime >= screenCaptureCooldownUntil
         else {
             return nil
         }
@@ -548,6 +548,8 @@ public enum AccessibilityBridge {
             config.showsCursor = false
 
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            screenCaptureLiveVerified = true
+            didLogScreenCaptureError = false
             guard let provider = cgImage.dataProvider,
                   let data = provider.data,
                   let ptr = CFDataGetBytePtr(data)
@@ -604,6 +606,9 @@ public enum AccessibilityBridge {
     // MARK: - Live Window Thumbnail & Snapshot (ScreenCaptureKit)
 
     private static var cachedCaptureFilters: [CGWindowID: (filter: SCContentFilter, frame: CGRect, cachedAt: TimeInterval)] = [:]
+    private static var screenCaptureCooldownUntil: TimeInterval = 0
+    private static var didLogScreenCaptureError = false
+    public static var screenCaptureLiveVerified: Bool = false
 
     public static func invalidateCaptureFilter(for windowID: CGWindowID) {
         cachedCaptureFilters.removeValue(forKey: windowID)
@@ -613,7 +618,7 @@ public enum AccessibilityBridge {
         guard windowID != 0,
               windowAXFrame.width >= 100,
               windowAXFrame.height >= 100,
-              hasScreenRecordingPermission()
+              ProcessInfo.processInfo.systemUptime >= screenCaptureCooldownUntil
         else {
             return nil
         }
@@ -652,9 +657,18 @@ public enum AccessibilityBridge {
             guard let activeFilter = filter else { return nil }
             do {
                 let cgImage = try await SCScreenshotManager.captureImage(contentFilter: activeFilter, configuration: config)
+                screenCaptureLiveVerified = true
+                didLogScreenCaptureError = false
                 return NSImage(cgImage: cgImage, size: windowAXFrame.size)
             } catch {
-                guard usedCached else { return nil }
+                if !usedCached {
+                    screenCaptureCooldownUntil = ProcessInfo.processInfo.systemUptime + 10.0
+                    if !didLogScreenCaptureError {
+                        didLogScreenCaptureError = true
+                        ShellLogger.log("ScreenCaptureKit snapshot error: \(error.localizedDescription)")
+                    }
+                    return nil
+                }
                 cachedCaptureFilters.removeValue(forKey: windowID)
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 guard let scWindow = content.windows.first(where: { $0.windowID == windowID }) else {
@@ -663,15 +677,24 @@ public enum AccessibilityBridge {
                 let freshFilter = SCContentFilter(desktopIndependentWindow: scWindow)
                 cachedCaptureFilters[windowID] = (freshFilter, windowAXFrame, ProcessInfo.processInfo.systemUptime)
                 let cgImage = try await SCScreenshotManager.captureImage(contentFilter: freshFilter, configuration: config)
+                screenCaptureLiveVerified = true
+                didLogScreenCaptureError = false
                 return NSImage(cgImage: cgImage, size: windowAXFrame.size)
             }
         } catch {
+            screenCaptureCooldownUntil = ProcessInfo.processInfo.systemUptime + 10.0
+            if !didLogScreenCaptureError {
+                didLogScreenCaptureError = true
+                ShellLogger.log("ScreenCaptureKit snapshot error: \(error.localizedDescription)")
+            }
             return nil
         }
     }
 
     public static func captureWindowThumbnail(windowID: CGWindowID) async -> NSImage? {
-        guard windowID != 0, hasScreenRecordingPermission() else {
+        guard windowID != 0,
+              ProcessInfo.processInfo.systemUptime >= screenCaptureCooldownUntil
+        else {
             return nil
         }
         do {
@@ -686,8 +709,15 @@ public enum AccessibilityBridge {
             config.height = max(80, Int(scWindow.frame.height * scale))
             config.showsCursor = false
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            screenCaptureLiveVerified = true
+            didLogScreenCaptureError = false
             return NSImage(cgImage: cgImage, size: NSSize(width: config.width, height: config.height))
         } catch {
+            screenCaptureCooldownUntil = ProcessInfo.processInfo.systemUptime + 10.0
+            if !didLogScreenCaptureError {
+                didLogScreenCaptureError = true
+                ShellLogger.log("ScreenCaptureKit snapshot error: \(error.localizedDescription)")
+            }
             return nil
         }
     }
