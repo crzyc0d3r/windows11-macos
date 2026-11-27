@@ -132,6 +132,7 @@ public final class TaskbarCoordinator {
             p.orderFrontRegardless()
             panels[displayID] = p
         }
+        ShellLogger.log("Taskbar panels created: \(panels.count) screen(s), height=\(Int(height))pt, level=statusBar")
     }
 
     private func startAutoHideAndFullscreenLoop() {
@@ -231,6 +232,23 @@ private struct TaskbarView: View {
 
                 // Right System Tray + Clock + Show Desktop Sliver
                 HStack(spacing: 4) {
+                    if !system.hasAccessibilityPermission || !system.hasInputMonitoringPermission {
+                        Button(action: onQuickSettingsClick) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11))
+                                Text("Permissions")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                            }
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.yellow.opacity(0.9)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Accessibility or Input Monitoring permission missing — click to open Quick Settings")
+                    }
+
                     TaskbarTrayButton(symbol: "chevron.up", action: onTrayOverflowClick)
                         .help("Show hidden icons")
 

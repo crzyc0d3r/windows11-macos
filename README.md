@@ -1,6 +1,6 @@
 # Windows 11 for macOS
 
-A **full native Windows 11 desktop shell replacement for macOS**, built in **Swift 6** (**SwiftUI** + **AppKit**) and integrated with **Karabiner-Elements**, **AltTab**, **Rectangle**, and a native **Windows 11 (24H2) File Explorer** (`FileExplorer.app`).
+A **100% custom, zero-third-party Windows 11 desktop shell replacement for macOS**, built in **Swift 6** (**SwiftUI** + **AppKit**) with native macOS APIs (`hidutil`, `CGEventTap`, and `AXUIElement`). It pairs a complete Windows 11 desktop shell (`Win11Shell.app`) with a native Windows 11 (24H2) File Explorer (`FileExplorer.app`)—with **zero Homebrew packages, zero kernel/DriverKit extensions, and zero third-party apps**.
 
 Designed to run with **System Integrity Protection (SIP) enabled** and switch cleanly between native macOS and the full Windows 11 environment using `./up` and `./down`.
 
@@ -9,10 +9,10 @@ Designed to run with **System Integrity Protection (SIP) enabled** and switch cl
 ## Quick Start (`./up` & `./down`)
 
 ```bash
-# Enable the full Windows 11 desktop shell (snapshots your macOS settings first)
+# Enable the full custom Windows 11 desktop shell (snapshots your macOS settings first)
 ./up
 
-# Restore original macOS (Dock, top Menu Bar, Finder, Karabiner, Rectangle, AltTab)
+# Restore original macOS (Dock, top Menu Bar, Finder, and built-in keyboard mapping)
 ./down
 ```
 
@@ -22,10 +22,8 @@ Designed to run with **System Integrity Protection (SIP) enabled** and switch cl
 |---|---|
 | `./up --dry-run` | Preview every `./up` action without modifying system defaults or apps |
 | `./up --rebuild` | Force rebuilding `FileExplorer.app` and `Win11Shell.app` before installing |
-| `./up --skip-brew` | Skip Homebrew cask installation (`karabiner-elements`, `alt-tab`, `rectangle`) |
 | `./down --dry-run` | Preview every `./down` restore action without changing system state |
 | `./down --keep-apps` | Restore macOS while keeping `/Applications/FileExplorer.app` and `/Applications/Win11Shell.app` |
-| `./down --uninstall-brew` | Also uninstall Homebrew casks that were newly installed by `./up` |
 
 *(Compatibility wrappers `scripts/up.sh` and `scripts/down.sh` delegate directly to `./up` and `./down`.)*
 
@@ -34,17 +32,15 @@ Designed to run with **System Integrity Protection (SIP) enabled** and switch cl
 On first run, `./up` saves a one-time backup snapshot to `~/Library/Application Support/HackedpleWin11/backup/` covering:
 - `com.apple.dock.plist` & `com.apple.finder.plist` (`CreateDesktop`, `QuitMenuItem`)
 - Global defaults (`_HIHideMenuBar`, `NSFileViewer`)
-- Existing Karabiner-Elements config (`~/.config/karabiner/karabiner.json`)
-- Existing Rectangle (`com.knollsoft.Rectangle`) and AltTab (`com.lwouis.alt-tab-macos`) preferences
-- Newly installed Homebrew casks (`installed-casks.txt`) and the `Win11Shell` LaunchAgent (`~/Library/LaunchAgents/com.hackedple.win11shell.plist`)
+- Built-in MacBook keyboard `hidutil` `Option ↔ Command` swap (`{"Built-In":true}`), reset cleanly by `./down` (`{"UserKeyMapping":[]}`)
+- The `Win11Shell` LaunchAgent (`~/Library/LaunchAgents/com.hackedple.win11shell.plist`) and shell log (`~/Library/Logs/Win11Shell.log`), both removed along with `~/Library/Application Support/HackedpleWin11/` by `./down`
 
 ### One-Time macOS Permissions Checklist
 
-After running `./up` the first time, grant these permissions in **System Settings → Privacy & Security** so global hotkeys, window bars, and live thumbnails work everywhere:
-1. **Accessibility**: Enable `Win11Shell`, `AltTab`, and `Rectangle`
-2. **Input Monitoring**: Enable `Win11Shell` and `karabiner_grabber`
-3. **Screen Recording**: Enable `Win11Shell` and `AltTab` (used for live taskbar & `Alt+Tab` window thumbnails)
-4. **Driver Extensions**: Allow the **Karabiner-Elements** DriverKit extension if prompted
+After running `./up` the first time, `./up` prints `--check-permissions` status. Grant these permissions to **Win11 Shell** in **System Settings → Privacy & Security** so global shortcuts, window management, and live thumbnails work everywhere:
+1. **Accessibility**: Enable `Win11 Shell` (required for per-window menu bars, window snapping, and right-side caption controls)
+2. **Input Monitoring**: Enable `Win11 Shell` (required for native `CGEventTap` Windows 11 shortcuts, solo `Win` key Start Menu tap, and the custom `Alt+Tab` switcher)
+3. **Screen Recording**: Enable `Win11 Shell` (optional; enables live taskbar hover and `Alt+Tab` window thumbnails)
 
 ---
 
@@ -56,7 +52,7 @@ A full-width **48pt Acrylic/Mica taskbar** rendered per display (replaces Apple'
 - **Taskbar Interactions**: Active accent pill, left-click active app to minimize/hide, middle-click to open a new window, **live hover window previews** with per-window close (`✕`), and right-click Jump Lists (New Window, open windows, Pin/Unpin, Quit).
 - **Widgets & System Stats Chip**: Live CPU load and memory usage badge opening a System & Widgets flyout.
 - **`^` System Tray Overflow**: Mirrors third-party top-right macOS menu bar extras (`AXExtrasMenuBar`) into a bottom tray popover alongside Activity Monitor (Task Manager) and System Settings shortcuts.
-- **Quick Settings Flyout (`Win+A`)**: Interactive Wi-Fi toggle/SSID, Bluetooth, Dark/Light mode, Hide Top Menu Bar, Auto-Hide Taskbar, Per-Window Menu Bar toggle, Display Brightness slider, Volume slider + mute, and Battery status.
+- **Quick Settings Flyout (`Win+A`)**: Interactive Wi-Fi toggle/SSID, Bluetooth status, Dark/Light mode, Hide Top Menu Bar, Auto-Hide Taskbar, Per-Window Menu Bar toggle, Display Brightness slider, Volume slider + mute, Battery status, and live Accessibility / Input Monitoring permission status.
 - **Clock & Calendar Flyout (`Win+N`)**: Live clock, date, and interactive month calendar grid.
 - **Show Desktop Sliver (`Win+D`)** & **Taskbar Settings** right-click menu.
 
@@ -66,9 +62,10 @@ A full-width **48pt Acrylic/Mica taskbar** rendered per display (replaces Apple'
 - **Recommended** recent files from `~/Desktop`, `~/Downloads`, and `~/Documents`
 - User profile badge and **Power** menu (`Lock`, `Sleep`, `Restart`, `Shut down`, `Sign out`)
 
-### 3. Per-Window Self-Contained Menu Bar & Right-Side Controls (`— □ ✕`)
-Because SIP prevents injecting views into other apps' native macOS titlebars, `Win11Shell` docks a **28pt bar flush above the focused window** (reserving `28pt` at the top and `48pt` at the bottom when maximizing):
-- **Live Mirrored App Menus**: Reads the active app's `AXMenuBar` (`File`, `Edit`, `View`, etc., collapsing overflow into `•••`) so every window has its own self-contained Windows-style menu bar while macOS's top menu bar stays hidden.
+### 3. Per-Window Self-Contained Menu Bar, Window Snapping & Right-Side Controls (`— □ ✕`)
+Because SIP prevents injecting views into other apps' native macOS titlebars, `Win11Shell` docks a **28pt bar flush above the focused window** and manages window frames natively via `AXUIElement` (reserving `28pt` at the top and `48pt` at the bottom):
+- **Live Mirrored App Menus**: Caches and reads the active app's `AXMenuBar` (`File`, `Edit`, `View`, etc., collapsing overflow into `•••`) so every window has its own self-contained Windows-style menu bar while macOS's top menu bar stays hidden.
+- **Custom Window Snapper (`WindowSnapManager`)**: Supports `Win+Arrow` snapping, drag-to-edge/corner snapping with a translucent Windows 11 snap preview overlay, per-window restore frames, and automatic startup normalization of visible windows into the Windows 11 work area.
 - **Window Dragging & Double-Click Maximize**: Drag the strip to move any window; double-click to maximize/restore.
 - **Right-Side Caption Buttons (`— □ ✕`)**:
   - `—` Minimize window
@@ -88,17 +85,19 @@ Because SIP prevents injecting views into other apps' native macOS titlebars, `W
 
 ---
 
-## Keyboard & Window Management
+## Native Keyboard Engine & Window Switching
 
-### Modifier Layout
-On the built-in MacBook keyboard, Karabiner swaps `Option ↔ Command` at the device layer so **both the built-in keyboard and external PC keyboards share identical physical positions**:
+### Modifier Layout (`hidutil` + `CGEventTap`)
+On the built-in MacBook keyboard, macOS's native `/usr/bin/hidutil` swaps `Option ↔ Command` at the HID driver layer (`{"Built-In":true}`) so **both the built-in keyboard and external PC keyboards share identical physical modifier positions**:
 
 ```text
 [ Ctrl ] [ Win ] [ Alt ] [ Space ]
 ```
 
+`Win11Shell`'s custom `CGEventTap` engine (`CustomKeyboardEngine`) handles all remapping and shortcuts natively in-process:
 - **Non-terminal apps**: `Ctrl+<key>` shortcuts map to macOS `Cmd+<key>` (`Ctrl+C`, `Ctrl+V`, `Ctrl+X`, `Ctrl+Z`, `Ctrl+Y` → Redo, `Ctrl+F`, `Ctrl+T`, `Ctrl+W`, etc.), while `Ctrl+Tab` stays native for switching tabs.
 - **Terminal apps** (`Terminal`, `iTerm2`, `Ghostty`, `Warp`, `Alacritty`, `kitty`, `WezTerm`, `Hyper`): Raw `Ctrl` is preserved (`Ctrl+C` sends `SIGINT`); use `Win+C` / `Win+V` for copy/paste.
+- **Custom `Alt+Tab` Switcher (`AltTabSwitcherController`)**: Native Windows 11 glass card overlay with live window thumbnails, keyboard navigation (`Alt+Tab` / `Alt+Shift+Tab`), click-to-focus, and per-card close (`✕`).
 
 ### Global Windows 11 Shortcuts
 
@@ -116,9 +115,9 @@ On the built-in MacBook keyboard, Karabiner swaps `Option ↔ Command` at the de
 | `Win+Shift+S` | Interactive Snipping Tool (clipboard screenshot) |
 | `Win+.` | Emoji & Symbols picker |
 | `Ctrl+Shift+Esc` | Task Manager (Activity Monitor) |
-| `Alt+Tab` | Live-thumbnail window switcher (`AltTab`) |
+| `Alt+Tab` / `Alt+Shift+Tab` | Custom live-thumbnail window switcher (`Win11Shell`) |
 | `Alt+F4` | Close window / quit app on last window |
-| `Win+Left` / `Win+Right` / `Win+Up` | Snap window Left Half / Right Half / Maximize (`Rectangle`) |
+| `Win+Left` / `Win+Right` / `Win+Up` | Snap window Left Half / Right Half / Maximize (`WindowSnapManager`) |
 | `Win+Down` | Unmaximize window, or minimize if not maximized |
 | `Win+Ctrl+Left` / `Win+Ctrl+Right` | Switch Virtual Desktops (macOS Spaces) |
 | `Home` / `End` (and `+Shift`) | Line start / end |
@@ -150,16 +149,16 @@ On the built-in MacBook keyboard, Karabiner swaps `Option ↔ Command` at the de
 
 ```text
 .
-├── up                              # Full Windows 11 environment initializer
+├── up                              # Full 100% custom Windows 11 environment initializer
 ├── down                            # Full restore to original macOS
 ├── Package.swift                   # FileExplorer Swift 6 package
 ├── Sources/FileExplorer*           # Windows 11 File Explorer app modules
 ├── Tests/FileExplorerCoreTests/    # FileExplorer unit tests
 ├── Win11Shell/
 │   ├── Package.swift               # Win11Shell Swift 6 package
-│   ├── Sources/Win11ShellCore/     # Config, Karabiner/Rectangle/AltTab generators, geometry, close policy, app catalog
-│   ├── Sources/Win11ShellApp/      # Taskbar, Start Menu, Quick Settings, Calendar, Per-Window Bar, AX/Hotkey/Finder bridges
-│   └── Tests/Win11ShellCoreTests/  # Win11ShellCore unit tests
+│   ├── Sources/Win11ShellCore/     # Config, hidutil mapping, keyboard remapper, geometry, close policy, app catalog
+│   ├── Sources/Win11ShellApp/      # Taskbar, Start Menu, Quick Settings, Calendar, Alt+Tab, Snap Manager, Per-Window Bar, Bridges
+│   └── Tests/Win11ShellCoreTests/  # Win11ShellCore & KeyboardEngine unit tests
 └── scripts/
     ├── build-app.sh                # Builds signed build/FileExplorer.app
     ├── build-win11shell.sh         # Builds signed build/Win11Shell.app
@@ -173,10 +172,10 @@ On the built-in MacBook keyboard, Karabiner swaps `Option ↔ Command` at the de
 
 - **macOS 15.0+** (Apple Silicon / Intel)
 - **Swift 6.0+** / **Xcode 16+**
-- **Homebrew** (optional; used by `./up` to install `karabiner-elements`, `alt-tab`, and `rectangle`)
+- **Zero external dependencies** (no Homebrew packages or third-party tools required)
 
 ```bash
-# Test Win11ShellCore & build Win11Shell.app
+# Test Win11ShellCore & KeyboardEngine, then build Win11Shell.app
 cd Win11Shell && swift test && cd ..
 ./scripts/build-win11shell.sh
 ./build/Win11Shell.app/Contents/MacOS/Win11ShellApp --smoke-test

@@ -1,6 +1,18 @@
 import CoreGraphics
 import Foundation
 
+public enum WindowSnapZone: String, CaseIterable, Equatable, Sendable {
+    case leftHalf
+    case rightHalf
+    case topLeft
+    case topRight
+    case bottomLeft
+    case bottomRight
+    case leftTwoThirds
+    case rightOneThird
+    case maximized
+}
+
 public enum WindowChromeGeometry {
     /// Converts a window frame in Accessibility coordinates (top-left primary screen origin, +Y down)
     /// to Cocoa screen coordinates (bottom-left primary screen origin, +Y up).
@@ -71,5 +83,135 @@ public enum WindowChromeGeometry {
             height: targetHeight
         )
         return cocoaRectToAX(cocoaTarget, primaryScreenHeight: primaryScreenHeight)
+    }
+
+    /// Computes the Accessibility frame for any `WindowSnapZone`, reserving top chrome bar and bottom taskbar.
+    public static func snapAXFrame(
+        for zone: WindowSnapZone,
+        screenFrameCocoa: CGRect,
+        visibleFrameCocoa: CGRect,
+        primaryScreenHeight: CGFloat,
+        barHeight: CGFloat,
+        taskbarHeight: CGFloat
+    ) -> CGRect {
+        let fullMaxAX = maximizedAXFrame(
+            forScreenFrameCocoa: screenFrameCocoa,
+            visibleFrameCocoa: visibleFrameCocoa,
+            primaryScreenHeight: primaryScreenHeight,
+            barHeight: barHeight,
+            taskbarHeight: taskbarHeight
+        )
+
+        switch zone {
+        case .maximized:
+            return fullMaxAX
+        case .leftHalf:
+            return CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height)
+        case .rightHalf:
+            return CGRect(x: fullMaxAX.minX + fullMaxAX.width / 2, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height)
+        case .topLeft:
+            return CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
+        case .topRight:
+            return CGRect(x: fullMaxAX.minX + fullMaxAX.width / 2, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
+        case .bottomLeft:
+            return CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY + fullMaxAX.height / 2, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
+        case .bottomRight:
+            return CGRect(x: fullMaxAX.minX + fullMaxAX.width / 2, y: fullMaxAX.minY + fullMaxAX.height / 2, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
+        case .leftTwoThirds:
+            return CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY, width: (fullMaxAX.width * 0.66).rounded(), height: fullMaxAX.height)
+        case .rightOneThird:
+            let w = (fullMaxAX.width * 0.34).rounded()
+            return CGRect(x: fullMaxAX.maxX - w, y: fullMaxAX.minY, width: w, height: fullMaxAX.height)
+        }
+    }
+
+    /// Returns a clamped AX frame when a standard non-fullscreen window extends into the top chrome bar
+    /// (`visibleFrame.maxY - barHeight`) or bottom taskbar (`screenFrame.minY + taskbarHeight`), or `nil` if already clean.
+    public static func normalizedAXFrame(
+        forAXWindowFrame axFrame: CGRect,
+        screenFrameCocoa: CGRect,
+        visibleFrameCocoa: CGRect,
+        primaryScreenHeight: CGFloat,
+        barHeight: CGFloat,
+        taskbarHeight: CGFloat
+    ) -> CGRect? {
+        guard axFrame.width >= 100, axFrame.height >= 100 else {
+            return nil
+        }
+
+        let cocoa = axRectToCocoa(axFrame, primaryScreenHeight: primaryScreenHeight)
+        let fillsWidth = abs(cocoa.width - screenFrameCocoa.width) < 4
+        let fillsHeight = abs(cocoa.height - screenFrameCocoa.height) < 4
+        if fillsWidth && fillsHeight {
+            return nil
+        }
+
+        let workMinY = screenFrameCocoa.minY + taskbarHeight
+        let workMaxY = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY) - barHeight
+        let workHeight = max(120, workMaxY - workMinY)
+
+        let extendsAbove = cocoa.maxY > workMaxY + 0.5
+        let extendsBelow = cocoa.minY < workMinY - 0.5
+        guard extendsAbove || extendsBelow else {
+            return nil
+        }
+
+        let clampedHeight = min(cocoa.height, workHeight)
+        let clampedMinY = min(max(cocoa.minY, workMinY), workMaxY - clampedHeight)
+        let clampedWidth = min(cocoa.width, screenFrameCocoa.width)
+        let clampedMinX = min(max(cocoa.minX, screenFrameCocoa.minX), screenFrameCocoa.maxX - clampedWidth)
+
+        let targetCocoa = CGRect(x: clampedMinX, y: clampedMinY, width: clampedWidth, height: clampedHeight)
+        return cocoaRectToAX(targetCocoa, primaryScreenHeight: primaryScreenHeight)
+    }
+
+    /// Maps a mouse pointer in Cocoa screen coordinates during a window drag to a Windows 11 snap zone.
+    public static func dragSnapZone(
+        forMouseCocoa mouseCocoa: CGPoint,
+        screenFrameCocoa: CGRect,
+        visibleFrameCocoa: CGRect,
+        edgeThreshold: CGFloat = 14,
+        cornerSize: CGFloat = 90
+    ) -> WindowSnapZone? {
+        guard mouseCocoa.x >= screenFrameCocoa.minX - 2,
+              mouseCocoa.x <= screenFrameCocoa.maxX + 2,
+              mouseCocoa.y >= screenFrameCocoa.minY - 2,
+              mouseCocoa.y <= screenFrameCocoa.maxY + 2
+        else {
+            return nil
+        }
+
+        let topEdgeY = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
+        let atLeft = mouseCocoa.x <= screenFrameCocoa.minX + edgeThreshold
+        let atRight = mouseCocoa.x >= screenFrameCocoa.maxX - edgeThreshold
+        let atTop = mouseCocoa.y >= topEdgeY - edgeThreshold
+
+        let nearTop = mouseCocoa.y >= topEdgeY - cornerSize
+        let nearBottom = mouseCocoa.y <= screenFrameCocoa.minY + cornerSize
+        let nearLeft = mouseCocoa.x <= screenFrameCocoa.minX + cornerSize
+        let nearRight = mouseCocoa.x >= screenFrameCocoa.maxX - cornerSize
+
+        if (atLeft && nearTop) || (atTop && nearLeft) {
+            return .topLeft
+        }
+        if (atRight && nearTop) || (atTop && nearRight) {
+            return .topRight
+        }
+        if atLeft && nearBottom {
+            return .bottomLeft
+        }
+        if atRight && nearBottom {
+            return .bottomRight
+        }
+        if atTop {
+            return .maximized
+        }
+        if atLeft {
+            return .leftHalf
+        }
+        if atRight {
+            return .rightHalf
+        }
+        return nil
     }
 }

@@ -60,8 +60,6 @@ public struct Win11Config: Codable, Equatable, Sendable {
         ],
         windowBarExcludedBundleIDs: [String] = [
             "com.hackedple.win11shell",
-            "com.lwouis.alt-tab-macos",
-            "com.knollsoft.Rectangle",
             "com.apple.Spotlight",
             "com.apple.notificationcenterui",
             "com.apple.controlcenter"

@@ -3,7 +3,6 @@ import AudioToolbox
 import CoreAudio
 import CoreWLAN
 import Foundation
-import IOBluetooth
 import IOKit.ps
 import Observation
 
@@ -36,6 +35,9 @@ public final class SystemControlsBridge {
     public var bluetoothOn: Bool = false
     public var isDarkMode: Bool = true
     public var topMenuBarHidden: Bool = true
+    public var hasAccessibilityPermission: Bool = false
+    public var hasInputMonitoringPermission: Bool = false
+    public var hasScreenRecordingPermission: Bool = false
     public var battery = BatteryStatus(percentage: 100, isCharging: false, isPluggedIn: true, present: false)
     public var stats = SystemStats(cpuPercent: 0, memoryUsedGB: 0, memoryTotalGB: 36)
 
@@ -43,6 +45,8 @@ public final class SystemControlsBridge {
     private let displayServicesHandle: UnsafeMutableRawPointer?
     private let getBrightnessFn: DisplayServicesGetBrightnessFn?
     private let setBrightnessFn: DisplayServicesSetBrightnessFn?
+    private var isRefreshingBluetooth = false
+    private var lastBluetoothCheck: Date = .distantPast
 
     public init() {
         let path = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
@@ -64,7 +68,7 @@ public final class SystemControlsBridge {
             self.setBrightnessFn = nil
         }
 
-        refresh()
+        refresh(forceBluetooth: true)
         timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refresh()
@@ -72,14 +76,21 @@ public final class SystemControlsBridge {
         }
     }
 
-    public func refresh() {
+    public func refresh(forceBluetooth: Bool = false) {
         refreshAudio()
         refreshBrightness()
         refreshWiFi()
-        refreshBluetooth()
+        refreshBluetooth(force: forceBluetooth)
         refreshAppearanceAndMenuBar()
+        refreshPermissions()
         refreshBattery()
         refreshStats()
+    }
+
+    public func refreshPermissions() {
+        hasAccessibilityPermission = AccessibilityBridge.hasAccessibilityPermission(prompt: false)
+        hasInputMonitoringPermission = AccessibilityBridge.hasInputMonitoringPermission()
+        hasScreenRecordingPermission = AccessibilityBridge.hasScreenRecordingPermission()
     }
 
     // MARK: - Audio
@@ -175,7 +186,7 @@ public final class SystemControlsBridge {
         _ = setBrightnessFn?(CGMainDisplayID(), clamped)
     }
 
-    // MARK: - Wi-Fi & Bluetooth
+    // MARK: - Wi-Fi & Bluetooth (TCC-safe, external CLI lookup)
 
     public func refreshWiFi() {
         if let iface = CWWiFiClient.shared().interface() {
@@ -199,10 +210,64 @@ public final class SystemControlsBridge {
         }
     }
 
-    public func refreshBluetooth() {
-        if let controller = IOBluetoothHostController.default() {
-            bluetoothOn = controller.powerState == kBluetoothHCIPowerStateON
+    public func refreshBluetooth(force: Bool = false) {
+        guard !isRefreshingBluetooth else { return }
+        let now = Date()
+        if !force && now.timeIntervalSince(lastBluetoothCheck) < 12.0 {
+            return
         }
+        isRefreshingBluetooth = true
+        lastBluetoothCheck = now
+
+        Task.detached(priority: .utility) {
+            let powered = Self.readBluetoothPowerStateSafely()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let powered {
+                    self.bluetoothOn = powered
+                }
+                self.isRefreshingBluetooth = false
+            }
+        }
+    }
+
+    nonisolated private static func readBluetoothPowerStateSafely() -> Bool? {
+        // 1. Fast preferences read (present on some macOS releases) without triggering Bluetooth TCC
+        let defaultsProc = Process()
+        let defaultsOut = Pipe()
+        defaultsProc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        defaultsProc.arguments = ["read", "/Library/Preferences/com.apple.Bluetooth", "ControllerPowerState"]
+        defaultsProc.standardOutput = defaultsOut
+        defaultsProc.standardError = FileHandle.nullDevice
+        if (try? defaultsProc.run()) != nil {
+            defaultsProc.waitUntilExit()
+            if defaultsProc.terminationStatus == 0 {
+                let data = defaultsOut.fileHandleForReading.readDataToEndOfFile()
+                let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if text == "1" { return true }
+                if text == "0" { return false }
+            }
+        }
+
+        // 2. Fallback via system_profiler CLI (external process, avoids TCC crash in Win11ShellApp)
+        let spProc = Process()
+        let spOut = Pipe()
+        spProc.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+        spProc.arguments = ["SPBluetoothDataType", "-json"]
+        spProc.standardOutput = spOut
+        spProc.standardError = FileHandle.nullDevice
+        guard (try? spProc.run()) != nil else { return nil }
+        let data = spOut.fileHandleForReading.readDataToEndOfFile()
+        spProc.waitUntilExit()
+        guard spProc.terminationStatus == 0,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = root["SPBluetoothDataType"] as? [[String: Any]],
+              let props = entries.first?["controller_properties"] as? [String: Any],
+              let state = props["controller_state"] as? String
+        else {
+            return nil
+        }
+        return state == "attrib_on"
     }
 
     public func openBluetoothSettings() {

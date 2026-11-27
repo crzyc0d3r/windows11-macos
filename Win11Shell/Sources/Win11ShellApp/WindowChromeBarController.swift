@@ -19,23 +19,31 @@ public final class WindowChromeBarState {
 @MainActor
 public final class WindowChromeBarController: NSObject {
     private let model: RunningAppsModel
+    private let snapManager: WindowSnapManager
     private let state = WindowChromeBarState()
     private var panel: NonActivatingFloatingPanel?
     private var snapPanel: NonActivatingFloatingPanel?
     private var syncTimer: Timer?
     private var axObserver: AXObserver?
     private var observedPID: pid_t = 0
+    private var lastMenuPID: pid_t = 0
+    private var cachedMenusByPID: [pid_t: [MirroredMenuItem]] = [:]
     private var currentWindow: AXWindowInfo?
     private var currentBundleID: String = ""
-    private var savedRestoreFrames: [String: CGRect] = [:]
     private var isDraggingTargetWindow = false
     private var snapDismissWork: DispatchWorkItem?
 
-    public init(model: RunningAppsModel) {
+    public init(model: RunningAppsModel, snapManager: WindowSnapManager) {
         self.model = model
+        self.snapManager = snapManager
         super.init()
         setupPanel()
         observeWorkspace()
+        syncActiveWindow()
+        DispatchQueue.main.async { [weak self] in
+            self?.attachAXObserverToFrontApp()
+            self?.syncActiveWindow()
+        }
         syncTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.syncActiveWindow()
@@ -68,7 +76,7 @@ public final class WindowChromeBarController: NSObject {
                 self?.dragCurrentWindow(deltaX: dx, deltaY: dy)
             },
             onDragEnded: { [weak self] in
-                self?.isDraggingTargetWindow = false
+                self?.finishDraggingCurrentWindow()
             },
             onDoubleClickTitle: { [weak self] in
                 self?.toggleMaximizeCurrentWindow()
@@ -91,7 +99,8 @@ public final class WindowChromeBarController: NSObject {
     }
 
     private func observeWorkspace() {
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -99,6 +108,21 @@ public final class WindowChromeBarController: NSObject {
             Task { @MainActor [weak self] in
                 self?.attachAXObserverToFrontApp()
                 self?.syncActiveWindow()
+            }
+        }
+        nc.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let pid = app?.processIdentifier ?? 0
+            Task { @MainActor [weak self] in
+                guard let self, pid != 0 else { return }
+                self.cachedMenusByPID.removeValue(forKey: pid)
+                if self.lastMenuPID == pid {
+                    self.lastMenuPID = 0
+                }
             }
         }
         attachAXObserverToFrontApp()
@@ -170,24 +194,26 @@ public final class WindowChromeBarController: NSObject {
             return
         }
 
+        let pid = front.processIdentifier
         currentWindow = win
         currentBundleID = bundleID
         state.appName = front.localizedName ?? bundleID
         state.appIcon = AppIconCache.icon(forBundleID: bundleID, url: front.bundleURL, size: 16)
         state.windowTitle = win.title.isEmpty ? state.appName : win.title
+        state.isMaximized = snapManager.isWindowMaximized(win, on: screen)
 
-        let maxAX = WindowChromeGeometry.maximizedAXFrame(
-            forScreenFrameCocoa: screen.frame,
-            visibleFrameCocoa: screen.visibleFrame,
-            primaryScreenHeight: primaryH,
-            barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
-        )
-        state.isMaximized = abs(win.axFrame.width - maxAX.width) < 12 && abs(win.axFrame.height - maxAX.height) < 12
-
-        // Refresh menu bar items when app changes or empty
-        if state.menuItems.isEmpty || observedPID == front.processIdentifier {
-            state.menuItems = AccessibilityBridge.readAppMenuBar(pid: front.processIdentifier)
+        // Cache menu bar items per PID — only query AXMenuBar when active PID changes
+        if pid != lastMenuPID {
+            lastMenuPID = pid
+            if let cached = cachedMenusByPID[pid], !cached.isEmpty {
+                state.menuItems = cached
+            } else {
+                let fresh = AccessibilityBridge.readAppMenuBar(pid: pid)
+                if !fresh.isEmpty {
+                    cachedMenusByPID[pid] = fresh
+                }
+                state.menuItems = fresh
+            }
         }
 
         if let panel {
@@ -195,7 +221,7 @@ public final class WindowChromeBarController: NSObject {
                 panel.setFrame(barRect, display: true)
             }
             if !panel.isVisible {
-                panel.orderFront(nil)
+                panel.orderFrontRegardless()
             }
         }
     }
@@ -206,96 +232,28 @@ public final class WindowChromeBarController: NSObject {
         snapPanel?.orderOut(nil)
     }
 
-    // MARK: - Window Actions
+    // MARK: - Window Actions (delegated to WindowSnapManager)
 
     public func minimizeCurrentWindow() {
-        guard let win = currentWindow else { return }
-        AccessibilityBridge.setMinimized(win.element, minimized: true)
-        hideBar()
+        if let win = currentWindow {
+            AccessibilityBridge.setMinimized(win.element, minimized: true)
+            hideBar()
+        } else {
+            snapManager.minimizeFrontWindow()
+        }
     }
 
     public func toggleMaximizeCurrentWindow() {
-        guard let win = currentWindow,
-              let screen = AccessibilityBridge.screenContaining(axFrame: win.axFrame)
-        else {
-            return
-        }
-
-        let primaryH = AccessibilityBridge.primaryScreenHeight()
-        let maxAX = WindowChromeGeometry.maximizedAXFrame(
-            forScreenFrameCocoa: screen.frame,
-            visibleFrameCocoa: screen.visibleFrame,
-            primaryScreenHeight: primaryH,
-            barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
-        )
-        let key = windowKey(win)
-
-        if state.isMaximized, let restore = savedRestoreFrames[key] {
-            AccessibilityBridge.setFrame(win.element, axFrame: restore)
-            savedRestoreFrames.removeValue(forKey: key)
-        } else {
-            savedRestoreFrames[key] = win.axFrame
-            AccessibilityBridge.setFrame(win.element, axFrame: maxAX)
-        }
-        syncActiveWindow()
+        snapManager.toggleMaximize(window: currentWindow, bundleID: currentBundleID.isEmpty ? nil : currentBundleID)
     }
 
     public func smartUnmaximizeOrMinimize() {
-        guard let win = currentWindow else { return }
-        if state.isMaximized {
-            toggleMaximizeCurrentWindow()
-        } else {
-            AccessibilityBridge.setMinimized(win.element, minimized: true)
-            hideBar()
-        }
+        snapManager.smartDownOrMinimize()
     }
 
-    public func applySnapZone(_ zone: SnapZone) {
-        guard let win = currentWindow,
-              let screen = AccessibilityBridge.screenContaining(axFrame: win.axFrame)
-        else {
-            return
-        }
-        let primaryH = AccessibilityBridge.primaryScreenHeight()
-        let barH = CGFloat(model.config.windowBarHeight)
-        let tbH = CGFloat(model.config.taskbarHeight)
-        let fullMaxAX = WindowChromeGeometry.maximizedAXFrame(
-            forScreenFrameCocoa: screen.frame,
-            visibleFrameCocoa: screen.visibleFrame,
-            primaryScreenHeight: primaryH,
-            barHeight: barH,
-            taskbarHeight: tbH
-        )
-        let key = windowKey(win)
-        if savedRestoreFrames[key] == nil {
-            savedRestoreFrames[key] = win.axFrame
-        }
-
-        let target: CGRect
-        switch zone {
-        case .leftHalf:
-            target = CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height)
-        case .rightHalf:
-            target = CGRect(x: fullMaxAX.minX + fullMaxAX.width / 2, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height)
-        case .topLeft:
-            target = CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
-        case .topRight:
-            target = CGRect(x: fullMaxAX.minX + fullMaxAX.width / 2, y: fullMaxAX.minY, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
-        case .bottomLeft:
-            target = CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY + fullMaxAX.height / 2, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
-        case .bottomRight:
-            target = CGRect(x: fullMaxAX.minX + fullMaxAX.width / 2, y: fullMaxAX.minY + fullMaxAX.height / 2, width: fullMaxAX.width / 2, height: fullMaxAX.height / 2)
-        case .leftTwoThirds:
-            target = CGRect(x: fullMaxAX.minX, y: fullMaxAX.minY, width: fullMaxAX.width * 0.66, height: fullMaxAX.height)
-        case .rightOneThird:
-            let w = fullMaxAX.width * 0.34
-            target = CGRect(x: fullMaxAX.maxX - w, y: fullMaxAX.minY, width: w, height: fullMaxAX.height)
-        }
-
-        AccessibilityBridge.setFrame(win.element, axFrame: target)
+    public func applySnapZone(_ zone: WindowSnapZone) {
+        snapManager.applySnapZone(zone, to: currentWindow, bundleID: currentBundleID.isEmpty ? nil : currentBundleID)
         snapPanel?.orderOut(nil)
-        syncActiveWindow()
     }
 
     public func closeOrQuitFrontWindow() {
@@ -315,12 +273,14 @@ public final class WindowChromeBarController: NSObject {
 
         if let focused = AccessibilityBridge.focusedWindow(for: front.processIdentifier) {
             if !AccessibilityBridge.pressCloseButton(focused.element) {
-                // Fallback Cmd+W
+                // Fallback Cmd+W (tagged with Win11Shell synthetic marker 0x57313153)
                 let src = CGEventSource(stateID: .hidSystemState)
                 if let down = CGEvent(keyboardEventSource: src, virtualKey: 13, keyDown: true),
                    let up = CGEvent(keyboardEventSource: src, virtualKey: 13, keyDown: false) {
                     down.flags = .maskCommand
                     up.flags = .maskCommand
+                    down.setIntegerValueField(.eventSourceUserData, value: 0x57313153)
+                    up.setIntegerValueField(.eventSourceUserData, value: 0x57313153)
                     down.post(tap: .cghidEventTap)
                     up.post(tap: .cghidEventTap)
                 }
@@ -357,10 +317,15 @@ public final class WindowChromeBarController: NSObject {
         )
         currentWindow = updated
         panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x + deltaX, y: panel.frame.origin.y + deltaY))
+        snapManager.updateDragPreview(mouseLocationCocoa: NSEvent.mouseLocation)
     }
 
-    private func windowKey(_ win: AXWindowInfo) -> String {
-        "\(win.pid)-\(win.windowID)-\(currentBundleID)"
+    private func finishDraggingCurrentWindow() {
+        let win = currentWindow
+        let bid = currentBundleID.isEmpty ? nil : currentBundleID
+        isDraggingTargetWindow = false
+        _ = snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
+        syncActiveWindow()
     }
 
     // MARK: - Live Mirrored App Menus
@@ -451,16 +416,12 @@ public final class WindowChromeBarController: NSObject {
             y: anchorScreenRect.minY - 126
         )
         snapPanel?.setFrameOrigin(origin)
-        snapPanel?.orderFront(nil)
+        snapPanel?.orderFrontRegardless()
     }
 }
 
-public enum SnapZone {
-    case leftHalf, rightHalf, topLeft, topRight, bottomLeft, bottomRight, leftTwoThirds, rightOneThird
-}
-
 private struct SnapLayoutsPopoverView: View {
-    let onSelect: (SnapZone) -> Void
+    let onSelect: (WindowSnapZone) -> Void
     let onHoverInside: (Bool) -> Void
 
     var body: some View {
@@ -505,7 +466,7 @@ private struct SnapLayoutsPopoverView: View {
         .onHover { onHoverInside($0) }
     }
 
-    private func zoneBox(_ zone: SnapZone) -> some View {
+    private func zoneBox(_ zone: WindowSnapZone) -> some View {
         SnapZoneButton(onTap: { onSelect(zone) })
     }
 }
@@ -539,8 +500,6 @@ private struct WindowChromeBarView: View {
     let onMaximize: () -> Void
     let onClose: () -> Void
     let onHoverMaximize: (Bool, NSRect) -> Void
-
-    @State private var maxButtonWindowFrame: NSRect = .zero
 
     var body: some View {
         HStack(spacing: 0) {

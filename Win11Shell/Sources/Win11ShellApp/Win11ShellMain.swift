@@ -1,6 +1,36 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import Win11ShellCore
+
+public enum ShellLogger {
+    private static let queue = DispatchQueue(label: "com.hackedple.win11shell.logger")
+
+    public static var logURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs", isDirectory: true)
+            .appendingPathComponent("Win11Shell.log")
+    }
+
+    public static func log(_ message: String) {
+        let timestamp = Date().formatted(.iso8601.year().month().day().time(includingFractionalSeconds: true))
+        let line = "[\(timestamp)] \(message)\n"
+        queue.async {
+            let url = logURL
+            let dir = url.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: url.path),
+               let handle = try? FileHandle(forWritingTo: url) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+                try? handle.close()
+            } else {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+    }
+}
 
 @main
 enum Win11ShellMain {
@@ -38,54 +68,13 @@ enum Win11ShellMain {
             }
         }
 
-        if args.contains("--generate-configs") {
-            var karabinerPath = (NSHomeDirectory() as NSString).appendingPathComponent(".config/karabiner/karabiner.json")
-            var devicesPath: String?
-            if let kIdx = args.firstIndex(of: "--karabiner-path"), args.indices.contains(kIdx + 1) {
-                karabinerPath = (args[kIdx + 1] as NSString).expandingTildeInPath
-            }
-            if let dIdx = args.firstIndex(of: "--devices-json"), args.indices.contains(dIdx + 1) {
-                devicesPath = (args[dIdx + 1] as NSString).expandingTildeInPath
-            }
-
-            do {
-                let store = Win11ConfigStore()
-                let config = store.load()
-                if !FileManager.default.fileExists(atPath: store.configURL.path) {
-                    try store.save(config)
-                }
-
-                let devicesData = devicesPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
-                let builtIns = devicesData.map { KarabinerConfigGenerator.parseConnectedBuiltInDevices(from: $0) }
-                    ?? [KarabinerDeviceIdentifier(vendorID: 0, productID: 0, isKeyboard: true)]
-
-                let kURL = URL(fileURLWithPath: karabinerPath)
-                let existing = try? Data(contentsOf: kURL)
-                let merged = try KarabinerConfigGenerator.mergeProfile(
-                    into: existing,
-                    builtInDevices: builtIns,
-                    config: config
-                )
-                try FileManager.default.createDirectory(at: kURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try merged.write(to: kURL, options: .atomic)
-                print("Configured Karabiner profile 'Win11' at \(kURL.path)")
-                return true
-            } catch {
-                fputs("Config generation error: \(error.localizedDescription)\n", stderr)
-                exit(1)
-            }
+        if args.contains("--hidutil-swap-json") {
+            print(HIDMappingGenerator.builtInSwapPropertyJSON())
+            return true
         }
 
-        if args.contains("--remove-karabiner-profile") {
-            var karabinerPath = (NSHomeDirectory() as NSString).appendingPathComponent(".config/karabiner/karabiner.json")
-            if let kIdx = args.firstIndex(of: "--karabiner-path"), args.indices.contains(kIdx + 1) {
-                karabinerPath = (args[kIdx + 1] as NSString).expandingTildeInPath
-            }
-            let kURL = URL(fileURLWithPath: karabinerPath)
-            if let existing = try? Data(contentsOf: kURL),
-               let updated = try? KarabinerConfigGenerator.removeWin11Profile(from: existing) {
-                try? updated.write(to: kURL, options: .atomic)
-            }
+        if args.contains("--hidutil-reset-json") {
+            print(HIDMappingGenerator.resetPropertyJSON())
             return true
         }
 
@@ -128,21 +117,40 @@ enum Win11ShellMain {
             throw NSError(domain: "SmokeTest", code: 1, userInfo: [NSLocalizedDescriptionKey: "Config mismatch"])
         }
 
-        let merged = try KarabinerConfigGenerator.mergeProfile(
-            into: nil,
-            builtInDevices: [KarabinerDeviceIdentifier(vendorID: 0, productID: 0, isKeyboard: true)],
-            config: loaded
-        )
-        guard let parsed = try JSONSerialization.jsonObject(with: merged) as? [String: Any],
-              (parsed["profiles"] as? [[String: Any]])?.count == 1
+        let swapJSON = HIDMappingGenerator.builtInSwapPropertyJSON()
+        let resetJSON = HIDMappingGenerator.resetPropertyJSON()
+        let matchingJSON = HIDMappingGenerator.builtInMatchingJSON()
+        guard let swapData = swapJSON.data(using: .utf8),
+              let swapObj = try JSONSerialization.jsonObject(with: swapData) as? [String: Any],
+              (swapObj["UserKeyMapping"] as? [[String: Any]])?.count == 4,
+              let resetData = resetJSON.data(using: .utf8),
+              let resetObj = try JSONSerialization.jsonObject(with: resetData) as? [String: Any],
+              (resetObj["UserKeyMapping"] as? [Any])?.isEmpty == true,
+              let matchData = matchingJSON.data(using: .utf8),
+              let matchObj = try JSONSerialization.jsonObject(with: matchData) as? [String: Any],
+              (matchObj["Built-In"] as? Bool) == true
         else {
-            throw NSError(domain: "SmokeTest", code: 2, userInfo: [NSLocalizedDescriptionKey: "Karabiner JSON invalid"])
+            throw NSError(domain: "SmokeTest", code: 2, userInfo: [NSLocalizedDescriptionKey: "HID mapping JSON invalid"])
+        }
+
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+        let leftSnap = WindowChromeGeometry.snapAXFrame(
+            for: .leftHalf,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: 982,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        guard leftSnap.width == 756, leftSnap.height == 868 else {
+            throw NSError(domain: "SmokeTest", code: 3, userInfo: [NSLocalizedDescriptionKey: "Snap geometry invalid"])
         }
 
         let iconURL = tempDir.appendingPathComponent("win11.png")
         try Win11IconRenderer.renderAppIconPNG(to: iconURL, size: 256)
         guard FileManager.default.fileExists(atPath: iconURL.path) else {
-            throw NSError(domain: "SmokeTest", code: 3, userInfo: [NSLocalizedDescriptionKey: "Icon PNG missing"])
+            throw NSError(domain: "SmokeTest", code: 4, userInfo: [NSLocalizedDescriptionKey: "Icon PNG missing"])
         }
 
         _ = AppCatalog.scanInstalledApps()
@@ -154,13 +162,18 @@ final class ShellAppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: ShellCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        _ = AccessibilityBridge.hasAccessibilityPermission(prompt: true)
+        let axGranted = AccessibilityBridge.hasAccessibilityPermission(prompt: true)
+        let inputGranted = AccessibilityBridge.hasInputMonitoringPermission()
+        let screenGranted = AccessibilityBridge.hasScreenRecordingPermission()
+        ShellLogger.log("Win11Shell starting (AX=\(axGranted), InputMonitoring=\(inputGranted), ScreenRecording=\(screenGranted))")
         coordinator = ShellCoordinator()
     }
 }
 
 @MainActor
 final class ShellCoordinator {
+    private static let syntheticEventTag: Int64 = 0x57313153
+
     private let configStore = Win11ConfigStore()
     private let model: RunningAppsModel
     private let system: SystemControlsBridge
@@ -171,12 +184,17 @@ final class ShellCoordinator {
     private let calendarFlyout: CalendarFlyoutController
     private let auxFlyouts: AuxiliaryFlyoutsController
     private let hoverPreview: TaskbarHoverPreviewController
+    private let windowSnap: WindowSnapManager
     private let windowBar: WindowChromeBarController
     private let taskbar: TaskbarCoordinator
-    private let hotkeys: HotkeyBridge
+    private let altTabSwitcher: AltTabSwitcherController
+    private let keyboardEngine: CustomKeyboardEngine
 
     init() {
         let model = RunningAppsModel(configStore: configStore)
+        if !FileManager.default.fileExists(atPath: configStore.configURL.path) {
+            try? configStore.save(model.config)
+        }
         let system = SystemControlsBridge()
         let finderSuppressor = FinderSuppressor(fileExplorerBundleID: model.config.fileExplorerBundleID)
         let showDesktop = ShowDesktopController()
@@ -185,7 +203,8 @@ final class ShellCoordinator {
         let calendarFlyout = CalendarFlyoutController(model: model)
         let auxFlyouts = AuxiliaryFlyoutsController(model: model, system: system)
         let hoverPreview = TaskbarHoverPreviewController(model: model)
-        let windowBar = WindowChromeBarController(model: model)
+        let windowSnap = WindowSnapManager(model: model)
+        let windowBar = WindowChromeBarController(model: model, snapManager: windowSnap)
         let taskbar = TaskbarCoordinator(
             model: model,
             system: system,
@@ -196,7 +215,10 @@ final class ShellCoordinator {
             hoverPreview: hoverPreview,
             showDesktop: showDesktop
         )
-        let hotkeys = HotkeyBridge()
+        let altTabSwitcher = AltTabSwitcherController(model: model)
+        let keyboardEngine = CustomKeyboardEngine(configProvider: { [weak model] in
+            model?.config ?? .default
+        })
 
         self.model = model
         self.system = system
@@ -207,17 +229,55 @@ final class ShellCoordinator {
         self.calendarFlyout = calendarFlyout
         self.auxFlyouts = auxFlyouts
         self.hoverPreview = hoverPreview
+        self.windowSnap = windowSnap
         self.windowBar = windowBar
         self.taskbar = taskbar
-        self.hotkeys = hotkeys
+        self.altTabSwitcher = altTabSwitcher
+        self.keyboardEngine = keyboardEngine
 
+        windowSnap.onWindowFrameChanged = { [weak windowBar] in
+            windowBar?.syncActiveWindow()
+        }
+
+        _ = windowSnap.normalizeVisibleWindows()
+        windowBar.syncActiveWindow()
         finderSuppressor.start()
-        _ = hotkeys.start { [weak self] action in
-            self?.handleHotkey(action)
+
+        Self.applyBuiltInHIDSwapAsync()
+
+        let tapStarted = keyboardEngine.start { [weak self] action in
+            self?.handleAction(action)
+        }
+        ShellLogger.log("CustomKeyboardEngine event tap started: \(tapStarted)")
+    }
+
+    private static func applyBuiltInHIDSwapAsync() {
+        let matchingJSON = HIDMappingGenerator.builtInMatchingJSON()
+        let swapJSON = HIDMappingGenerator.builtInSwapPropertyJSON()
+        Task.detached(priority: .userInitiated) {
+            let proc = Process()
+            let errPipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/hidutil")
+            proc.arguments = ["property", "--matching", matchingJSON, "--set", swapJSON]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = errPipe
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                if proc.terminationStatus == 0 {
+                    ShellLogger.log("Applied built-in hidutil Option<->Command swap")
+                } else {
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errMsg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    ShellLogger.log("hidutil swap exited with status \(proc.terminationStatus): \(errMsg)")
+                }
+            } catch {
+                ShellLogger.log("Failed to run hidutil swap: \(error.localizedDescription)")
+            }
         }
     }
 
-    private func handleHotkey(_ action: ShellHotkeyAction) {
+    private func handleAction(_ action: ShellCommandAction) {
         switch action {
         case .toggleStartMenu:
             quickSettings.dismiss()
@@ -256,8 +316,39 @@ final class ShellCoordinator {
             try? proc.run()
         case .openTaskManager:
             NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app"))
-        case .smartUnmaximizeOrMinimize:
-            windowBar.smartUnmaximizeOrMinimize()
+        case .snapLeft:
+            windowSnap.snapLeft()
+        case .snapRight:
+            windowSnap.snapRight()
+        case .snapMaximize:
+            windowSnap.toggleMaximize()
+        case .snapDownOrMinimize:
+            windowSnap.smartDownOrMinimize()
+        case .switchDesktopLeft:
+            postSyntheticKey(virtualKey: 123, flags: .maskControl)
+        case .switchDesktopRight:
+            postSyntheticKey(virtualKey: 124, flags: .maskControl)
+        case .altTabNext(let reverse):
+            altTabSwitcher.step(reverse: reverse)
+        case .altTabCommit:
+            altTabSwitcher.commitSelection()
+        case .altTabCancel:
+            altTabSwitcher.cancel()
         }
+    }
+
+    private func postSyntheticKey(virtualKey: CGKeyCode, flags: CGEventFlags) {
+        let src = CGEventSource(stateID: .hidSystemState)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: virtualKey, keyDown: false)
+        else {
+            return
+        }
+        down.flags = flags
+        up.flags = flags
+        down.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventTag)
+        up.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventTag)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 }

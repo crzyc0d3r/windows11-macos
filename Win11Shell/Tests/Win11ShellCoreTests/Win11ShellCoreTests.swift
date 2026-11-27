@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Win11ShellCore Tests")
 struct Win11ShellCoreTests {
-    @Test("Config round-trip serialization")
+    @Test("Config round-trip serialization and no external tool exclusions")
     func configRoundTrip() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("Win11ShellConfigTest-\(UUID().uuidString)", isDirectory: true)
@@ -21,112 +21,12 @@ struct Win11ShellCoreTests {
         try store.save(config)
         let loaded = store.load()
         #expect(loaded == config)
-    }
-
-    @Test("Karabiner profile merge preserves existing profiles, places built-in swap in devices, and avoids Home/End collision")
-    func karabinerMergeAndRules() throws {
-        let existingJSON = """
-        {
-          "global": { "check_for_updates_on_startup": false },
-          "profiles": [
-            { "name": "Default profile", "selected": true, "complex_modifications": { "rules": [] } }
-          ]
-        }
-        """.data(using: .utf8)!
-
-        let cliDevices = """
-        [
-          {
-            "device_identifiers": { "is_keyboard": true, "product_id": 0, "vendor_id": 0 },
-            "is_built_in_keyboard": true,
-            "is_keyboard": true
-          },
-          {
-            "device_identifiers": { "is_keyboard": true, "product_id": 1234, "vendor_id": 5678 },
-            "is_built_in_keyboard": false,
-            "is_keyboard": true
-          }
-        ]
-        """.data(using: .utf8)!
-
-        let builtIns = KarabinerConfigGenerator.parseConnectedBuiltInDevices(from: cliDevices)
-        #expect(builtIns == [KarabinerDeviceIdentifier(vendorID: 0, productID: 0, isKeyboard: true)])
-
-        let merged = try KarabinerConfigGenerator.mergeProfile(
-            into: existingJSON,
-            builtInDevices: builtIns,
-            config: .default
-        )
-
-        let root = try #require(try JSONSerialization.jsonObject(with: merged) as? [String: Any])
-        let profiles = try #require(root["profiles"] as? [[String: Any]])
-        #expect(profiles.count == 2)
-
-        let defaultProfile = try #require(profiles.first { ($0["name"] as? String) == "Default profile" })
-        #expect((defaultProfile["selected"] as? Bool) == false)
-
-        let win11Profile = try #require(profiles.first { ($0["name"] as? String) == "Win11" })
-        #expect((win11Profile["selected"] as? Bool) == true)
-
-        // Built-in device swap MUST be in devices[].simple_modifications
-        let devices = try #require(win11Profile["devices"] as? [[String: Any]])
-        #expect(devices.count == 1)
-        let simpleMods = try #require(devices[0]["simple_modifications"] as? [[String: Any]])
-        #expect(simpleMods.count == 4)
-
-        let complex = try #require(win11Profile["complex_modifications"] as? [String: Any])
-        let rules = try #require(complex["rules"] as? [[String: Any]])
-        #expect(rules.count == 4)
-
-        // Verify Home/End do NOT collide with Win+Left/Right (Win+Left maps to Ctrl+Opt+Cmd+Left)
-        let globalRules = try #require(rules[1]["manipulators"] as? [[String: Any]])
-        let winLeft = globalRules.first {
-            let from = $0["from"] as? [String: Any]
-            return (from?["key_code"] as? String) == "left_arrow"
-                && (from?["modifiers"] as? [String: Any])?["mandatory"] as? [String] == ["command"]
-        }
-        let winLeftTo = try #require((winLeft?["to"] as? [[String: Any]])?.first)
-        #expect((winLeftTo["modifiers"] as? [String]) == ["control", "option", "command"])
-
-        // Verify Terminal apps are excluded in rule 4 and Ctrl+Tab is NOT remapped
-        let nonTermRule = rules[3]
-        let nonTermManipulators = try #require(nonTermRule["manipulators"] as? [[String: Any]])
-        let firstCond = try #require((nonTermManipulators[0]["conditions"] as? [[String: Any]])?.first)
-        #expect((firstCond["type"] as? String) == "frontmost_application_unless")
-        let hasCtrlTab = nonTermManipulators.contains {
-            let from = $0["from"] as? [String: Any]
-            return (from?["key_code"] as? String) == "tab"
-        }
-        #expect(!hasCtrlTab)
-
-        // Verify FileExplorer rule 3 targets com.hackedple.fileexplorer
-        let feRule = rules[2]
-        let feManipulators = try #require(feRule["manipulators"] as? [[String: Any]])
-        let feCond = try #require((feManipulators[0]["conditions"] as? [[String: Any]])?.first)
-        #expect((feCond["type"] as? String) == "frontmost_application_if")
-        #expect((feCond["bundle_identifiers"] as? [String]) == ["^com\\.hackedple\\.fileexplorer$"])
-
-        // Verify removal restores selection to Default profile
-        let removed = try KarabinerConfigGenerator.removeWin11Profile(from: merged)
-        let removedRoot = try #require(try JSONSerialization.jsonObject(with: removed) as? [String: Any])
-        let remaining = try #require(removedRoot["profiles"] as? [[String: Any]])
-        #expect(remaining.count == 1)
-        #expect((remaining[0]["selected"] as? Bool) == true)
-    }
-
-    @Test("Rectangle and AltTab defaults avoid Cmd+Arrow collision and reserve 28pt/48pt gaps")
-    func externalToolConfigs() {
-        let rect = ExternalToolConfigGenerator.rectangleCommands()
-        let topGap = rect.first { $0.key == "screenEdgeGapTop" }
-        let bottomGap = rect.first { $0.key == "screenEdgeGapBottom" }
-        let leftHalf = rect.first { $0.key == "leftHalf" }
-        #expect(topGap?.arguments == ["-int", "28"])
-        #expect(bottomGap?.arguments == ["-int", "48"])
-        #expect(leftHalf?.arguments.contains("1835008") == true)
-
-        let altTab = ExternalToolConfigGenerator.altTabCommands()
-        #expect(altTab.contains { $0.key == "holdShortcut" && $0.arguments == ["-string", "⌥"] })
-        #expect(altTab.contains { $0.key == "nextWindowShortcut" && $0.arguments == ["-string", "⇥"] })
+        #expect(loaded.windowBarExcludedBundleIDs == [
+            "com.hackedple.win11shell",
+            "com.apple.Spotlight",
+            "com.apple.notificationcenterui",
+            "com.apple.controlcenter"
+        ])
     }
 
     @Test("AX <-> Cocoa geometry conversion, docked bar placement, and maximized frame")
@@ -175,6 +75,139 @@ struct Win11ShellCoreTests {
         #expect(maxCocoa.minY == 48)
         #expect(maxCocoa.maxY == CGFloat(944 - 28))
         #expect(maxCocoa.width == 1512)
+    }
+
+    @Test("Snap zones reserve 28pt chrome bar and 48pt taskbar across halves, quadrants, and thirds")
+    func snapZoneGeometry() {
+        let primaryHeight: CGFloat = 982
+        let screenFrame = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visibleFrame = CGRect(x: 0, y: 0, width: 1512, height: 944)
+
+        let leftAX = WindowChromeGeometry.snapAXFrame(
+            for: .leftHalf,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        let rightAX = WindowChromeGeometry.snapAXFrame(
+            for: .rightHalf,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(leftAX.minX == 0)
+        #expect(leftAX.width == 756)
+        #expect(rightAX.minX == 756)
+        #expect(rightAX.width == 756)
+        #expect(leftAX.height == CGFloat(944 - 28 - 48))
+
+        let topRightAX = WindowChromeGeometry.snapAXFrame(
+            for: .topRight,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        let bottomLeftAX = WindowChromeGeometry.snapAXFrame(
+            for: .bottomLeft,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(topRightAX.minY == leftAX.minY)
+        #expect(topRightAX.height == leftAX.height / 2)
+        #expect(bottomLeftAX.minY == leftAX.minY + leftAX.height / 2)
+
+        let twoThirds = WindowChromeGeometry.snapAXFrame(
+            for: .leftTwoThirds,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        let oneThird = WindowChromeGeometry.snapAXFrame(
+            for: .rightOneThird,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(twoThirds.width + oneThird.width == 1512)
+        #expect(oneThird.maxX == 1512)
+    }
+
+    @Test("Window normalization clamps overlapping windows into 28pt/48pt work area and skips clean or fullscreen windows")
+    func windowNormalization() {
+        let primaryHeight: CGFloat = 982
+        let screenFrame = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visibleFrame = CGRect(x: 0, y: 0, width: 1512, height: 944)
+
+        // Window extending into top bar and bottom taskbar
+        let overlappingCocoa = CGRect(x: 80, y: 10, width: 900, height: 930)
+        let overlappingAX = WindowChromeGeometry.cocoaRectToAX(overlappingCocoa, primaryScreenHeight: primaryHeight)
+        let clampedAX = WindowChromeGeometry.normalizedAXFrame(
+            forAXWindowFrame: overlappingAX,
+            screenFrameCocoa: screenFrame,
+            visibleFrameCocoa: visibleFrame,
+            primaryScreenHeight: primaryHeight,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        let clampedCocoa = clampedAX.map { WindowChromeGeometry.axRectToCocoa($0, primaryScreenHeight: primaryHeight) }
+        #expect(clampedCocoa != nil)
+        #expect(clampedCocoa!.minY >= 48)
+        #expect(clampedCocoa!.maxY <= CGFloat(944 - 28))
+
+        // Already clean window returns nil
+        let cleanCocoa = CGRect(x: 100, y: 120, width: 800, height: 600)
+        let cleanAX = WindowChromeGeometry.cocoaRectToAX(cleanCocoa, primaryScreenHeight: primaryHeight)
+        #expect(
+            WindowChromeGeometry.normalizedAXFrame(
+                forAXWindowFrame: cleanAX,
+                screenFrameCocoa: screenFrame,
+                visibleFrameCocoa: visibleFrame,
+                primaryScreenHeight: primaryHeight,
+                barHeight: 28,
+                taskbarHeight: 48
+            ) == nil
+        )
+
+        // Fullscreen window returns nil
+        let fullscreenAX = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        #expect(
+            WindowChromeGeometry.normalizedAXFrame(
+                forAXWindowFrame: fullscreenAX,
+                screenFrameCocoa: screenFrame,
+                visibleFrameCocoa: visibleFrame,
+                primaryScreenHeight: primaryHeight,
+                barHeight: 28,
+                taskbarHeight: 48
+            ) == nil
+        )
+    }
+
+    @Test("Drag-to-edge and corner snap zone detection")
+    func dragSnapZones() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 4, y: 500), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .leftHalf)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 1508, y: 500), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .rightHalf)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 750, y: 940), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .maximized)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 5, y: 940), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .topLeft)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 1508, y: 940), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .topRight)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 5, y: 20), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .bottomLeft)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 1508, y: 20), screenFrameCocoa: screen, visibleFrameCocoa: visible) == .bottomRight)
+        #expect(WindowChromeGeometry.dragSnapZone(forMouseCocoa: CGPoint(x: 750, y: 500), screenFrameCocoa: screen, visibleFrameCocoa: visible) == nil)
     }
 
     @Test("WindowClosePolicy quits on last window except keep-alive apps")

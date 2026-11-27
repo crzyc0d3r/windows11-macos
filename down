@@ -5,34 +5,29 @@ usage() {
     cat <<'EOF'
 Usage: ./down [OPTIONS]
 
-Cleanly tears down the Windows 11 environment and restores original macOS:
+Cleanly tears down the custom Windows 11 environment and restores original macOS:
   - Unloads & removes the Win11Shell LaunchAgent
-  - Quits Win11Shell, FileExplorer, AltTab, and Rectangle
-  - Restores Dock, top Menu Bar, Finder (CreateDesktop, QuitMenuItem, NSFileViewer),
-    Karabiner, Rectangle, and AltTab from the pre-init backup snapshot
+  - Resets built-in keyboard hidutil Option <-> Command mapping
+  - Quits Win11ShellApp and FileExplorerApp
+  - Restores Dock, top Menu Bar, and Finder defaults from the pre-init backup snapshot
   - Unregisters & removes /Applications/Win11Shell.app and /Applications/FileExplorer.app
-  - Restarts Dock, SystemUIServer, and relaunches Finder
+  - Removes HackedpleWin11 support files and Win11Shell logs
+  - Restarts Dock, SystemUIServer, ControlCenter, and relaunches Finder
 
 Options:
-  --keep-apps       Keep /Applications/Win11Shell.app and /Applications/FileExplorer.app
-  --uninstall-brew  Also uninstall Homebrew casks that were newly installed by ./up
-  --dry-run         Print actions without modifying system defaults or apps
-  -h, --help        Show this help message and exit
+  --keep-apps   Keep /Applications/Win11Shell.app and /Applications/FileExplorer.app
+  --dry-run     Print actions without modifying system defaults or apps
+  -h, --help    Show this help message and exit
 EOF
 }
 
 KEEP_APPS=false
-UNINSTALL_BREW=false
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-apps)
             KEEP_APPS=true
-            shift
-            ;;
-        --uninstall-brew)
-            UNINSTALL_BREW=true
             shift
             ;;
         --dry-run)
@@ -79,14 +74,6 @@ else
     }
 fi
 
-BREW_BIN=""
-for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
-    if [[ -x "$candidate" ]]; then
-        BREW_BIN="$candidate"
-        break
-    fi
-done
-
 FE_BUNDLE_ID="com.hackedple.fileexplorer"
 SHELL_BUNDLE_ID="com.hackedple.win11shell"
 DEST_FE_APP="/Applications/FileExplorer.app"
@@ -96,15 +83,18 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 SUPPORT_DIR="$TARGET_HOME/Library/Application Support/HackedpleWin11"
 BACKUP_DIR="$SUPPORT_DIR/backup"
 LAUNCH_AGENT_PLIST="$TARGET_HOME/Library/LaunchAgents/${SHELL_BUNDLE_ID}.plist"
-KARABINER_JSON="$TARGET_HOME/.config/karabiner/karabiner.json"
+LOG_FILE="$TARGET_HOME/Library/Logs/Win11Shell.log"
+LEGACY_FINDER_BACKUP="$TARGET_HOME/Library/Application Support/FileExplorer/finder-backup.env"
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "[DRY RUN] Target user: $TARGET_USER ($TARGET_UID), home: $TARGET_HOME"
     echo "[DRY RUN] 1. Unload & remove LaunchAgent: $LAUNCH_AGENT_PLIST"
-    echo "[DRY RUN] 2. Quit Win11Shell, FileExplorer, AltTab, Rectangle"
-    echo "[DRY RUN] 3. Restore Dock, Finder, _HIHideMenuBar, NSFileViewer, Karabiner from: $BACKUP_DIR"
-    echo "[DRY RUN] 4. Remove /Applications apps (keep_apps=$KEEP_APPS), uninstall newly added casks (uninstall_brew=$UNINSTALL_BREW)"
-    echo "[DRY RUN] 5. Restart Dock, SystemUIServer, ControlCenter and open Finder"
+    echo "[DRY RUN] 2. Reset built-in keyboard hidutil mapping: {\"UserKeyMapping\":[]}"
+    echo "[DRY RUN] 3. Quit Win11ShellApp and FileExplorerApp"
+    echo "[DRY RUN] 4. Restore Dock, Finder, _HIHideMenuBar, NSFileViewer, CreateDesktop, QuitMenuItem from: $BACKUP_DIR"
+    echo "[DRY RUN] 5. Unregister & remove /Applications apps (keep_apps=$KEEP_APPS)"
+    echo "[DRY RUN] 6. Remove $SUPPORT_DIR, $LOG_FILE, and $LEGACY_FINDER_BACKUP"
+    echo "[DRY RUN] 7. Restart Dock, SystemUIServer, ControlCenter and open Finder"
     exit 0
 fi
 
@@ -112,24 +102,22 @@ echo "1. Removing Win11Shell LaunchAgent..."
 run_as_user /bin/launchctl bootout "gui/$TARGET_UID/$SHELL_BUNDLE_ID" 2>/dev/null || true
 rm -f "$LAUNCH_AGENT_PLIST"
 
-echo "2. Stopping Windows 11 apps..."
-for bid in "$SHELL_BUNDLE_ID" "$FE_BUNDLE_ID" "com.lwouis.alt-tab-macos" "com.knollsoft.Rectangle"; do
+echo "2. Resetting built-in keyboard hidutil modifier mapping..."
+run_as_user /usr/bin/hidutil property --matching '{"Built-In":true}' --set '{"UserKeyMapping":[]}' >/dev/null 2>&1 || true
+
+echo "3. Stopping Win11ShellApp and FileExplorerApp..."
+for bid in "$SHELL_BUNDLE_ID" "$FE_BUNDLE_ID"; do
     run_as_user /usr/bin/osascript -e "tell application id \"$bid\" to quit" 2>/dev/null || true
 done
 sleep 0.5
 /usr/bin/pkill -u "$TARGET_UID" -x Win11ShellApp 2>/dev/null || true
 /usr/bin/pkill -u "$TARGET_UID" -x FileExplorerApp 2>/dev/null || true
-/usr/bin/pkill -u "$TARGET_UID" -x AltTab 2>/dev/null || true
-/usr/bin/pkill -u "$TARGET_UID" -x Rectangle 2>/dev/null || true
 
-echo "3. Restoring original macOS defaults & tool configs..."
+echo "4. Restoring original macOS defaults..."
 PREV_HI_HIDE_MENU_BAR="__UNSET__"
 PREV_NS_FILE_VIEWER="__UNSET__"
 PREV_FINDER_CREATE_DESKTOP="__UNSET__"
 PREV_FINDER_QUIT_MENU="__UNSET__"
-KARABINER_EXISTED="true"
-RECTANGLE_EXISTED="false"
-ALTTAB_EXISTED="false"
 
 if [[ -f "$BACKUP_DIR/global.env" ]]; then
     while IFS='=' read -r key val || [[ -n "$key" ]]; do
@@ -138,9 +126,6 @@ if [[ -f "$BACKUP_DIR/global.env" ]]; then
             PREV_NS_FILE_VIEWER) PREV_NS_FILE_VIEWER="$val" ;;
             PREV_FINDER_CREATE_DESKTOP) PREV_FINDER_CREATE_DESKTOP="$val" ;;
             PREV_FINDER_QUIT_MENU) PREV_FINDER_QUIT_MENU="$val" ;;
-            KARABINER_EXISTED) KARABINER_EXISTED="$val" ;;
-            RECTANGLE_EXISTED) RECTANGLE_EXISTED="$val" ;;
-            ALTTAB_EXISTED) ALTTAB_EXISTED="$val" ;;
         esac
     done < "$BACKUP_DIR/global.env"
 fi
@@ -151,6 +136,7 @@ if [[ -s "$BACKUP_DIR/com.apple.dock.plist" ]]; then
 else
     run_as_user /usr/bin/defaults delete com.apple.dock autohide-delay 2>/dev/null || true
     run_as_user /usr/bin/defaults delete com.apple.dock autohide-time-modifier 2>/dev/null || true
+    run_as_user /usr/bin/defaults delete com.apple.dock no-bouncing 2>/dev/null || true
 fi
 
 # Top Menu Bar
@@ -183,43 +169,6 @@ case "$PREV_FINDER_QUIT_MENU" in
     *) run_as_user /usr/bin/defaults delete com.apple.finder QuitMenuItem 2>/dev/null || true ;;
 esac
 
-# Rectangle & AltTab plists
-if [[ "$RECTANGLE_EXISTED" == "true" && -s "$BACKUP_DIR/com.knollsoft.Rectangle.plist" ]]; then
-    run_as_user /usr/bin/defaults import com.knollsoft.Rectangle "$BACKUP_DIR/com.knollsoft.Rectangle.plist"
-else
-    run_as_user /usr/bin/defaults delete com.knollsoft.Rectangle 2>/dev/null || true
-fi
-
-if [[ "$ALTTAB_EXISTED" == "true" && -s "$BACKUP_DIR/com.lwouis.alt-tab-macos.plist" ]]; then
-    run_as_user /usr/bin/defaults import com.lwouis.alt-tab-macos "$BACKUP_DIR/com.lwouis.alt-tab-macos.plist"
-else
-    run_as_user /usr/bin/defaults delete com.lwouis.alt-tab-macos 2>/dev/null || true
-fi
-
-# Karabiner
-if [[ "$KARABINER_EXISTED" == "true" && -f "$BACKUP_DIR/karabiner.json.bak" ]]; then
-    cp "$BACKUP_DIR/karabiner.json.bak" "$KARABINER_JSON"
-elif [[ "$KARABINER_EXISTED" == "false" ]]; then
-    rm -f "$KARABINER_JSON"
-elif [[ -x "$DEST_SHELL_APP/Contents/MacOS/Win11ShellApp" ]]; then
-    run_as_user "$DEST_SHELL_APP/Contents/MacOS/Win11ShellApp" --remove-karabiner-profile --karabiner-path "$KARABINER_JSON" || true
-fi
-
-# Also clear legacy FileExplorer backup file if present
-rm -f "$TARGET_HOME/Library/Application Support/FileExplorer/finder-backup.env"
-
-if [[ "$UNINSTALL_BREW" == true && -n "$BREW_BIN" && -f "$BACKUP_DIR/installed-casks.txt" ]]; then
-    echo "4. Uninstalling Homebrew casks newly installed by ./up..."
-    while IFS= read -r cask || [[ -n "$cask" ]]; do
-        [[ -z "$cask" ]] && continue
-        echo "   Uninstalling cask: $cask"
-        if [[ "$cask" == "karabiner-elements" ]]; then
-            /usr/bin/pkill -u "$TARGET_UID" -f Karabiner 2>/dev/null || true
-        fi
-        run_as_user "$BREW_BIN" uninstall --cask "$cask" || true
-    done < "$BACKUP_DIR/installed-casks.txt"
-fi
-
 if [[ "$KEEP_APPS" == false ]]; then
     echo "5. Unregistering and removing /Applications apps..."
     for app in "$DEST_SHELL_APP" "$DEST_FE_APP"; do
@@ -232,9 +181,11 @@ else
     echo "5. Keeping installed apps (--keep-apps)."
 fi
 
-rm -rf "$BACKUP_DIR"
+echo "6. Cleaning up support files and logs..."
+rm -rf "$SUPPORT_DIR"
+rm -f "$LOG_FILE" "$LEGACY_FINDER_BACKUP"
 
-echo "6. Restarting Dock, SystemUIServer, ControlCenter, and Finder..."
+echo "7. Restarting Dock, SystemUIServer, ControlCenter, and Finder..."
 run_as_user /usr/bin/killall Dock 2>/dev/null || true
 run_as_user /usr/bin/killall SystemUIServer 2>/dev/null || true
 run_as_user /usr/bin/killall ControlCenter 2>/dev/null || true

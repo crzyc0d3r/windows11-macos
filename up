@@ -5,33 +5,27 @@ usage() {
     cat <<'EOF'
 Usage: ./up [OPTIONS]
 
-Initializes the full Windows 11 macOS environment:
-  - Snapshots original macOS Dock, Menu Bar, Finder, Karabiner, Rectangle, and AltTab state
+Initializes the 100% custom Windows 11 macOS environment (zero third-party apps):
+  - Snapshots original macOS Dock, Menu Bar, and Finder state
   - Builds & installs FileExplorer.app and Win11Shell.app into /Applications
-  - Installs & configures Karabiner-Elements, AltTab, and Rectangle via Homebrew
+  - Applies native hidutil Option <-> Command swap on the built-in keyboard
   - Hides Apple's Dock, auto-hides the macOS top Menu Bar, and suppresses Finder
-  - Installs a LaunchAgent for Win11Shell and launches the Windows 11 desktop shell
+  - Installs a LaunchAgent for Win11Shell, launches the shell, and verifies liveness
 
 Options:
   --rebuild     Force rebuilding FileExplorer.app and Win11Shell.app
-  --skip-brew   Skip Homebrew cask installation (configure only if already installed)
-  --dry-run     Print actions without modifying system defaults, apps, or brew packages
+  --dry-run     Print actions without modifying system defaults or apps
   -h, --help    Show this help message and exit
 EOF
 }
 
 REBUILD=false
-SKIP_BREW=false
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rebuild)
             REBUILD=true
-            shift
-            ;;
-        --skip-brew)
-            SKIP_BREW=true
             shift
             ;;
         --dry-run)
@@ -80,14 +74,6 @@ else
     }
 fi
 
-BREW_BIN=""
-for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
-    if [[ -x "$candidate" ]]; then
-        BREW_BIN="$candidate"
-        break
-    fi
-done
-
 FE_BUNDLE_ID="com.hackedple.fileexplorer"
 SHELL_BUNDLE_ID="com.hackedple.win11shell"
 SRC_FE_APP="$ROOT_DIR/build/FileExplorer.app"
@@ -100,20 +86,21 @@ SUPPORT_DIR="$TARGET_HOME/Library/Application Support/HackedpleWin11"
 BACKUP_DIR="$SUPPORT_DIR/backup"
 LAUNCH_AGENT_DIR="$TARGET_HOME/Library/LaunchAgents"
 LAUNCH_AGENT_PLIST="$LAUNCH_AGENT_DIR/${SHELL_BUNDLE_ID}.plist"
-KARABINER_DIR="$TARGET_HOME/.config/karabiner"
-KARABINER_JSON="$KARABINER_DIR/karabiner.json"
-KARABINER_CLI="/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli"
+LOGS_DIR="$TARGET_HOME/Library/Logs"
+LOG_FILE="$LOGS_DIR/Win11Shell.log"
+
+HIDUTIL_FALLBACK_JSON='{"UserKeyMapping":[{"HIDKeyboardModifierMappingSrc":0x7000000E2,"HIDKeyboardModifierMappingDst":0x7000000E3},{"HIDKeyboardModifierMappingSrc":0x7000000E3,"HIDKeyboardModifierMappingDst":0x7000000E2},{"HIDKeyboardModifierMappingSrc":0x7000000E6,"HIDKeyboardModifierMappingDst":0x7000000E7},{"HIDKeyboardModifierMappingSrc":0x7000000E7,"HIDKeyboardModifierMappingDst":0x7000000E6}]}'
 
 if [[ "$DRY_RUN" == true ]]; then
     echo "[DRY RUN] Target user: $TARGET_USER ($TARGET_UID), home: $TARGET_HOME"
     echo "[DRY RUN] 1. Snapshot original macOS defaults to: $BACKUP_DIR"
     echo "[DRY RUN] 2. Build (rebuild=$REBUILD) and install: $SRC_FE_APP -> $DEST_FE_APP"
     echo "[DRY RUN] 3. Build (rebuild=$REBUILD) and install: $SRC_SHELL_APP -> $DEST_SHELL_APP"
-    echo "[DRY RUN] 4. Homebrew (skip=$SKIP_BREW, brew=${BREW_BIN:-missing}) ensure casks: karabiner-elements, alt-tab, rectangle"
-    echo "[DRY RUN] 5. Configure Karabiner 'Win11' profile, Rectangle (gaps 28/48, Ctrl+Opt+Cmd+Arrows), AltTab (Option+Tab)"
-    echo "[DRY RUN] 6. Apply macOS defaults: NSFileViewer=$FE_BUNDLE_ID, CreateDesktop=false, Dock hidden, _HIHideMenuBar=true"
-    echo "[DRY RUN] 7. Install LaunchAgent: $LAUNCH_AGENT_PLIST"
-    echo "[DRY RUN] 8. Restart Dock/SystemUIServer, quit Finder, launch Win11Shell & FileExplorer"
+    echo "[DRY RUN] 4. Apply built-in keyboard Option <-> Command swap via hidutil (--matching '{\"Built-In\":true}')"
+    echo "[DRY RUN] 5. Apply macOS defaults: NSFileViewer=$FE_BUNDLE_ID, QuitMenuItem=true, CreateDesktop=false, Dock hidden, _HIHideMenuBar=true"
+    echo "[DRY RUN] 6. Install & bootstrap LaunchAgent: $LAUNCH_AGENT_PLIST (logs: $LOG_FILE)"
+    echo "[DRY RUN] 7. Restart Dock/SystemUIServer, quit Finder, launch Win11Shell & FileExplorer"
+    echo "[DRY RUN] 8. Verify Win11ShellApp liveness (1.5s) and print --check-permissions status"
     exit 0
 fi
 
@@ -126,31 +113,18 @@ fi
 if [[ ! -f "$BACKUP_DIR/snapshot.done" ]]; then
     run_as_user /usr/bin/defaults export com.apple.dock - > "$BACKUP_DIR/com.apple.dock.plist" 2>/dev/null || true
     run_as_user /usr/bin/defaults export com.apple.finder - > "$BACKUP_DIR/com.apple.finder.plist" 2>/dev/null || true
-    run_as_user /usr/bin/defaults export com.knollsoft.Rectangle - > "$BACKUP_DIR/com.knollsoft.Rectangle.plist" 2>/dev/null || rm -f "$BACKUP_DIR/com.knollsoft.Rectangle.plist"
-    run_as_user /usr/bin/defaults export com.lwouis.alt-tab-macos - > "$BACKUP_DIR/com.lwouis.alt-tab-macos.plist" 2>/dev/null || rm -f "$BACKUP_DIR/com.lwouis.alt-tab-macos.plist"
 
     PREV_HI_HIDE_MENU_BAR="$(run_as_user /usr/bin/defaults read -g _HIHideMenuBar 2>/dev/null || echo "__UNSET__")"
     PREV_NS_FILE_VIEWER="$(run_as_user /usr/bin/defaults read -g NSFileViewer 2>/dev/null || echo "__UNSET__")"
     PREV_FINDER_CREATE_DESKTOP="$(run_as_user /usr/bin/defaults read com.apple.finder CreateDesktop 2>/dev/null || echo "__UNSET__")"
     PREV_FINDER_QUIT_MENU="$(run_as_user /usr/bin/defaults read com.apple.finder QuitMenuItem 2>/dev/null || echo "__UNSET__")"
 
-    if [[ -f "$KARABINER_JSON" ]]; then
-        cp "$KARABINER_JSON" "$BACKUP_DIR/karabiner.json.bak"
-        KARABINER_EXISTED=true
-    else
-        KARABINER_EXISTED=false
-    fi
-
     cat > "$BACKUP_DIR/global.env" <<EOF
 PREV_HI_HIDE_MENU_BAR=${PREV_HI_HIDE_MENU_BAR}
 PREV_NS_FILE_VIEWER=${PREV_NS_FILE_VIEWER}
 PREV_FINDER_CREATE_DESKTOP=${PREV_FINDER_CREATE_DESKTOP}
 PREV_FINDER_QUIT_MENU=${PREV_FINDER_QUIT_MENU}
-KARABINER_EXISTED=${KARABINER_EXISTED}
-RECTANGLE_EXISTED=$([[ -s "$BACKUP_DIR/com.knollsoft.Rectangle.plist" ]] && echo true || echo false)
-ALTTAB_EXISTED=$([[ -s "$BACKUP_DIR/com.lwouis.alt-tab-macos.plist" ]] && echo true || echo false)
 EOF
-    : > "$BACKUP_DIR/installed-casks.txt"
     touch "$BACKUP_DIR/snapshot.done"
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         chown -R "$TARGET_USER:$TARGET_GROUP" "$BACKUP_DIR"
@@ -174,60 +148,14 @@ chmod -R a+rX "$DEST_FE_APP" "$DEST_SHELL_APP"
 run_as_user "$LSREGISTER" -f "$DEST_FE_APP"
 run_as_user "$LSREGISTER" -f "$DEST_SHELL_APP"
 
-if [[ "$SKIP_BREW" == false ]]; then
-    if [[ -z "$BREW_BIN" ]]; then
-        echo "Warning: Homebrew not found; skipping cask installation." >&2
-    else
-        echo "3. Checking/installing Homebrew casks (karabiner-elements, alt-tab, rectangle)..."
-        INSTALLED_CASKS="$(run_as_user "$BREW_BIN" list --cask 2>/dev/null || true)"
-        for cask in karabiner-elements alt-tab rectangle; do
-            if ! grep -qx "$cask" <<< "$INSTALLED_CASKS"; then
-                echo "   Installing cask: $cask"
-                run_as_user "$BREW_BIN" install --cask "$cask"
-                if ! grep -qx "$cask" "$BACKUP_DIR/installed-casks.txt" 2>/dev/null; then
-                    echo "$cask" >> "$BACKUP_DIR/installed-casks.txt"
-                fi
-            else
-                echo "   Already installed: $cask"
-            fi
-        done
-    fi
-else
-    echo "3. Skipping Homebrew cask installation (--skip-brew)."
+echo "3. Applying native Option <-> Command swap on built-in MacBook keyboard..."
+HIDUTIL_SWAP_JSON="$(run_as_user "$DEST_SHELL_APP/Contents/MacOS/Win11ShellApp" --hidutil-swap-json 2>/dev/null || true)"
+if [[ -z "$HIDUTIL_SWAP_JSON" ]]; then
+    HIDUTIL_SWAP_JSON="$HIDUTIL_FALLBACK_JSON"
 fi
+run_as_user /usr/bin/hidutil property --matching '{"Built-In":true}' --set "$HIDUTIL_SWAP_JSON" >/dev/null
 
-echo "4. Configuring Karabiner-Elements, Rectangle, and AltTab..."
-DEVICES_TMP="$(mktemp /tmp/karabiner-devices.XXXXXX.json)"
-trap 'rm -f "$DEVICES_TMP"' EXIT
-if [[ -x "$KARABINER_CLI" ]]; then
-    run_as_user "$KARABINER_CLI" --list-connected-devices > "$DEVICES_TMP" 2>/dev/null || echo "[]" > "$DEVICES_TMP"
-    run_as_user "$DEST_SHELL_APP/Contents/MacOS/Win11ShellApp" --generate-configs --karabiner-path "$KARABINER_JSON" --devices-json "$DEVICES_TMP"
-else
-    run_as_user "$DEST_SHELL_APP/Contents/MacOS/Win11ShellApp" --generate-configs --karabiner-path "$KARABINER_JSON"
-fi
-
-# Rectangle (reserve 28pt top window chrome bar + 48pt bottom taskbar; Ctrl+Opt+Cmd+Arrows)
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle screenEdgeGapTop -int 28
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle screenEdgeGapBottom -int 48
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle launchOnLogin -bool true
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle hideMenubarIcon -bool true
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle snapEdgeMarginTop -int 5
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle snapEdgeMarginBottom -int 5
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle snapEdgeMarginLeft -int 5
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle snapEdgeMarginRight -int 5
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle leftHalf -dict keyCode -int 123 modifierFlags -int 1835008
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle rightHalf -dict keyCode -int 124 modifierFlags -int 1835008
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle maximize -dict keyCode -int 126 modifierFlags -int 1835008
-run_as_user /usr/bin/defaults write com.knollsoft.Rectangle restore -dict keyCode -int 125 modifierFlags -int 1966080
-
-# AltTab (Option+Tab after Karabiner swap)
-run_as_user /usr/bin/defaults write com.lwouis.alt-tab-macos holdShortcut -string "⌥"
-run_as_user /usr/bin/defaults write com.lwouis.alt-tab-macos nextWindowShortcut -string "⇥"
-run_as_user /usr/bin/defaults write com.lwouis.alt-tab-macos menubarIcon -string "3"
-run_as_user /usr/bin/defaults write com.lwouis.alt-tab-macos startAtLogin -bool true
-run_as_user /usr/bin/defaults write com.lwouis.alt-tab-macos windowDisplayDelay -string "0"
-
-echo "5. Applying macOS Finder suppression, Dock hiding, and top Menu Bar auto-hide..."
+echo "4. Applying macOS Finder suppression, Dock hiding, and top Menu Bar auto-hide..."
 run_as_user /usr/bin/defaults write -g NSFileViewer -string "$FE_BUNDLE_ID"
 run_as_user /usr/bin/defaults write com.apple.finder QuitMenuItem -bool true
 run_as_user /usr/bin/defaults write com.apple.finder CreateDesktop -bool false
@@ -237,8 +165,8 @@ run_as_user /usr/bin/defaults write com.apple.dock autohide-time-modifier -float
 run_as_user /usr/bin/defaults write com.apple.dock no-bouncing -bool true
 run_as_user /usr/bin/defaults write -g _HIHideMenuBar -bool true
 
-echo "6. Installing LaunchAgent for Win11Shell..."
-mkdir -p "$LAUNCH_AGENT_DIR"
+echo "5. Installing LaunchAgent for Win11Shell..."
+mkdir -p "$LAUNCH_AGENT_DIR" "$LOGS_DIR"
 cat > "$LAUNCH_AGENT_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -254,46 +182,54 @@ cat > "$LAUNCH_AGENT_PLIST" <<EOF
     <true/>
     <key>KeepAlive</key>
     <false/>
+    <key>StandardOutPath</key>
+    <string>${LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_FILE}</string>
 </dict>
 </plist>
 EOF
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     chown "$TARGET_USER:$TARGET_GROUP" "$LAUNCH_AGENT_PLIST"
+    chown "$TARGET_USER:$TARGET_GROUP" "$LOGS_DIR"
 fi
 run_as_user /bin/launchctl bootout "gui/$TARGET_UID/$SHELL_BUNDLE_ID" 2>/dev/null || true
 run_as_user /bin/launchctl bootstrap "gui/$TARGET_UID" "$LAUNCH_AGENT_PLIST" 2>/dev/null || true
 
-echo "7. Restarting system UI & launching Windows 11 environment..."
+echo "6. Restarting system UI & launching Windows 11 environment..."
 run_as_user /usr/bin/killall Dock 2>/dev/null || true
 run_as_user /usr/bin/killall SystemUIServer 2>/dev/null || true
 run_as_user /usr/bin/killall Finder 2>/dev/null || true
 
-for app_path in \
-    "/Applications/Karabiner-Elements.app" \
-    "/Applications/AltTab.app" \
-    "/Applications/Rectangle.app"; do
-    if [[ -d "$app_path" ]]; then
-        run_as_user /usr/bin/open -g "$app_path" || true
-    fi
-done
-
-if [[ -x "$KARABINER_CLI" ]]; then
-    sleep 1
-    run_as_user "$KARABINER_CLI" --select-profile "Win11" 2>/dev/null || true
-fi
-
 run_as_user /usr/bin/open "$DEST_SHELL_APP"
 run_as_user /usr/bin/open "$DEST_FE_APP"
+
+echo "7. Verifying Win11ShellApp liveness..."
+sleep 1.5
+if ! /usr/bin/pgrep -u "$TARGET_UID" -x Win11ShellApp >/dev/null 2>&1; then
+    echo "Error: Win11ShellApp is NOT running after launch!" >&2
+    if [[ -f "$LOG_FILE" ]]; then
+        echo "--- Tail of $LOG_FILE ---" >&2
+        tail -n 40 "$LOG_FILE" >&2 || true
+        echo "-------------------------" >&2
+    else
+        echo "No log file found at $LOG_FILE." >&2
+    fi
+    exit 1
+fi
 
 echo ""
 echo "Windows 11 environment is UP!"
 echo "  File Explorer: $DEST_FE_APP (NSFileViewer=$FE_BUNDLE_ID)"
 echo "  Win11 Shell:   $DEST_SHELL_APP"
+echo "  Shell Log:     $LOG_FILE"
 echo ""
-echo "One-time macOS permissions checklist (if prompted in System Settings -> Privacy & Security):"
-echo "  1. Accessibility:     Enable Win11Shell, AltTab, and Rectangle"
-echo "  2. Input Monitoring:  Enable Win11Shell and karabiner_grabber"
-echo "  3. Screen Recording:  Enable Win11Shell and AltTab (for live taskbar/Alt+Tab thumbnails)"
-echo "  4. Driver Extensions: Allow Karabiner-Elements DriverKit if prompted"
+echo "Permission status (--check-permissions):"
+run_as_user "$DEST_SHELL_APP/Contents/MacOS/Win11ShellApp" --check-permissions || true
+echo ""
+echo "One-time macOS permissions checklist (System Settings -> Privacy & Security):"
+echo "  1. Accessibility:    Enable Win11 Shell (required for per-window menu bars, window snapping, and caption buttons)"
+echo "  2. Input Monitoring: Enable Win11 Shell (required for Win11 shortcuts, Win key Start Menu tap, and Alt+Tab switcher)"
+echo "  3. Screen Recording: Enable Win11 Shell (optional; enables live taskbar hover & Alt+Tab window thumbnails)"
 echo ""
 echo "Restore original macOS anytime with: $ROOT_DIR/down"

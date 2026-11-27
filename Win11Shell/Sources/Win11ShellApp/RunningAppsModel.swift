@@ -132,8 +132,6 @@ public final class RunningAppsModel {
             app.activationPolicy == .regular
                 && app.bundleIdentifier != "com.apple.finder"
                 && app.bundleIdentifier != "com.hackedple.win11shell"
-                && app.bundleIdentifier != "com.lwouis.alt-tab-macos"
-                && app.bundleIdentifier != "com.knollsoft.Rectangle"
         }
 
         var runningByBundle: [String: NSRunningApplication] = [:]

@@ -81,8 +81,12 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
     <true/>
     <key>NSAccessibilityUsageDescription</key>
     <string>Win11 Shell uses Accessibility to mirror per-window menu bars, manage windows, and render right-side window controls.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Win11 Shell uses Apple Events to toggle macOS Dark Mode and trigger system power actions.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Win11 Shell displays Bluetooth status in Quick Settings and opens Bluetooth settings when requested.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Win11 Shell uses Screen Recording for live taskbar hover window thumbnails.</string>
+    <string>Win11 Shell uses Screen Recording for live taskbar hover window thumbnails and Alt+Tab previews.</string>
 </dict>
 </plist>
 EOF

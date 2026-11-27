@@ -26,10 +26,18 @@ public final class QuickSettingsController {
     }
 
     public func show(on screen: NSScreen? = nil) {
-        system.refresh()
+        system.refresh(forceBluetooth: true)
+        let hosting = NSHostingView(rootView: QuickSettingsView(
+            model: model,
+            system: system,
+            onDismiss: { [weak self] in self?.dismiss() }
+        ))
+        let fitting = hosting.fittingSize
+        let size = NSSize(width: 360, height: max(390, fitting.height))
+
         if panel == nil {
             let p = FocusableFloatingPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 360, height: 390),
+                contentRect: NSRect(origin: .zero, size: size),
                 styleMask: [.borderless],
                 backing: .buffered,
                 defer: false
@@ -39,20 +47,19 @@ public final class QuickSettingsController {
             p.backgroundColor = .clear
             p.isOpaque = false
             p.hasShadow = true
-            p.contentView = NSHostingView(rootView: QuickSettingsView(
-                model: model,
-                system: system,
-                onDismiss: { [weak self] in self?.dismiss() }
-            ))
             panel = p
         }
 
-        let target = screen ?? NSScreen.main ?? NSScreen.screens.first
-        if let target, let panel {
-            let x = target.frame.maxX - panel.frame.width - 12
-            let y = target.frame.minY + CGFloat(model.config.taskbarHeight) + 12
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-            panel.makeKeyAndOrderFront(nil)
+        if let panel {
+            panel.setContentSize(size)
+            panel.contentView = hosting
+            let target = screen ?? NSScreen.main ?? NSScreen.screens.first
+            if let target {
+                let x = target.frame.maxX - size.width - 12
+                let y = target.frame.minY + CGFloat(model.config.taskbarHeight) + 12
+                panel.setFrameOrigin(NSPoint(x: x, y: y))
+                panel.makeKeyAndOrderFront(nil)
+            }
         }
         installOutsideMonitor()
     }
@@ -83,8 +90,55 @@ private struct QuickSettingsView: View {
     @Bindable var system: SystemControlsBridge
     let onDismiss: () -> Void
 
+    private var needsCorePermissions: Bool {
+        !system.hasAccessibilityPermission || !system.hasInputMonitoringPermission
+    }
+
     var body: some View {
         VStack(spacing: 14) {
+            if needsCorePermissions {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text("Permissions needed for full Win11 shell")
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    HStack(spacing: 8) {
+                        PermissionPillButton(
+                            title: system.hasAccessibilityPermission ? "Accessibility OK" : "Grant Accessibility",
+                            granted: system.hasAccessibilityPermission
+                        ) {
+                            _ = AccessibilityBridge.hasAccessibilityPermission(prompt: true)
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                NSWorkspace.shared.open(url)
+                            }
+                            onDismiss()
+                        }
+                        PermissionPillButton(
+                            title: system.hasInputMonitoringPermission ? "Input OK" : "Grant Input",
+                            granted: system.hasInputMonitoringPermission
+                        ) {
+                            CGRequestListenEventAccess()
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+                                NSWorkspace.shared.open(url)
+                            }
+                            onDismiss()
+                        }
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.yellow.opacity(0.14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.yellow.opacity(0.35), lineWidth: 1)
+                        )
+                )
+            }
+
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 QuickTile(
                     title: system.wifiOn ? system.wifiSSID : "Wi-Fi",
@@ -202,6 +256,31 @@ private struct QuickSettingsView: View {
     }
 }
 
+private struct PermissionPillButton: View {
+    let title: String
+    let granted: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .font(.system(size: 11))
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(granted ? Color.green : Color.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(granted ? Color.green.opacity(0.14) : Color.primary.opacity(0.10))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct QuickTile: View {
     let title: String
     let symbol: String
@@ -251,7 +330,7 @@ public final class AuxiliaryFlyoutsController {
 
     public func show(mode: Mode, on screen: NSScreen? = nil) {
         model.refreshAll()
-        system.refresh()
+        system.refresh(forceBluetooth: true)
 
         let size: NSSize
         let rootView: AnyView
@@ -263,7 +342,7 @@ public final class AuxiliaryFlyoutsController {
             size = NSSize(width: 340, height: 320)
             rootView = AnyView(WidgetsFlyoutView(model: model, system: system, onDismiss: { [weak self] in self?.dismiss() }))
         case .taskbarSettings:
-            size = NSSize(width: 340, height: 360)
+            size = NSSize(width: 340, height: 390)
             rootView = AnyView(TaskbarSettingsFlyoutView(model: model, system: system, onDismiss: { [weak self] in self?.dismiss() }))
         }
 
@@ -491,7 +570,7 @@ private struct TaskbarSettingsFlyoutView: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 11) {
             Text("Taskbar & Win11 Settings")
                 .font(.system(size: 14, weight: .semibold))
 
@@ -513,13 +592,28 @@ private struct TaskbarSettingsFlyoutView: View {
 
             Divider()
 
-            HStack {
-                Label("AX: \(AccessibilityBridge.hasAccessibilityPermission() ? "OK" : "Needed")", systemImage: "accessibility")
-                Spacer()
-                Label("Input: \(AccessibilityBridge.hasInputMonitoringPermission() ? "OK" : "Needed")", systemImage: "keyboard")
+            HStack(spacing: 8) {
+                PermissionPillButton(
+                    title: "AX: \(system.hasAccessibilityPermission ? "OK" : "Needed")",
+                    granted: system.hasAccessibilityPermission
+                ) {
+                    _ = AccessibilityBridge.hasAccessibilityPermission(prompt: true)
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    onDismiss()
+                }
+                PermissionPillButton(
+                    title: "Input: \(system.hasInputMonitoringPermission ? "OK" : "Needed")",
+                    granted: system.hasInputMonitoringPermission
+                ) {
+                    CGRequestListenEventAccess()
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+                        NSWorkspace.shared.open(url)
+                    }
+                    onDismiss()
+                }
             }
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
 
             HStack {
                 Button("Privacy Settings") {
@@ -535,7 +629,7 @@ private struct TaskbarSettingsFlyoutView: View {
             }
         }
         .padding(16)
-        .frame(width: 340, height: 360)
+        .frame(width: 340, height: 390)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(.ultraThickMaterial)
