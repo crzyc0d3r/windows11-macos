@@ -67,8 +67,13 @@ public final class FocusableFloatingPanel: NSPanel {
 /// Non-activating NSPanel used for the per-window menu bar, Taskbar, and hover previews
 /// so clicking buttons never steals focus away from the active app window unless desired.
 public final class NonActivatingFloatingPanel: NSPanel {
+    public var allowsNotchAreaPlacement: Bool = false
     public override var canBecomeKey: Bool { false }
     public override var canBecomeMain: Bool { false }
+
+    public override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        allowsNotchAreaPlacement ? frameRect : super.constrainFrameRect(frameRect, to: screen)
+    }
 }
 
 @MainActor

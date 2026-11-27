@@ -5,97 +5,6 @@ import QuartzCore
 import SwiftUI
 import Win11ShellCore
 
-private struct DragMoveRequest: @unchecked Sendable {
-    let generation: UInt64
-    let element: AXUIElement
-    let windowID: CGWindowID
-    let origin: CGPoint
-    let fallbackSize: CGSize
-}
-
-private final class AXWindowDragWorker: @unchecked Sendable {
-    private let lock = NSLock()
-    private let queue = DispatchQueue(label: "com.hackedple.win11shell.axdrag", qos: .userInteractive)
-    private var generation: UInt64 = 0
-    private var pending: DragMoveRequest?
-    private var isDraining = false
-
-    func beginSession() -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        generation &+= 1
-        pending = nil
-        return generation
-    }
-
-    func cancelSession() {
-        lock.lock()
-        defer { lock.unlock() }
-        generation &+= 1
-        pending = nil
-    }
-
-    func submit(
-        _ request: DragMoveRequest,
-        onLiveBounds: @escaping @Sendable (UInt64, CGWindowID, CGRect) -> Void
-    ) {
-        var shouldStartDrain = false
-        lock.lock()
-        if request.generation == generation {
-            pending = request
-            if !isDraining {
-                isDraining = true
-                shouldStartDrain = true
-            }
-        }
-        lock.unlock()
-
-        if shouldStartDrain {
-            queue.async { [weak self] in
-                self?.drain(onLiveBounds: onLiveBounds)
-            }
-        }
-    }
-
-    private func drain(onLiveBounds: @escaping @Sendable (UInt64, CGWindowID, CGRect) -> Void) {
-        while true {
-            lock.lock()
-            let nextReq = pending
-            pending = nil
-            let currentGen = generation
-            guard let req = nextReq, req.generation == currentGen else {
-                isDraining = false
-                lock.unlock()
-                return
-            }
-            lock.unlock()
-
-            AXUIElementSetMessagingTimeout(req.element, 0.06)
-            var pos = req.origin
-            if let posVal = AXValueCreate(.cgPoint, &pos) {
-                AXUIElementSetAttributeValue(req.element, kAXPositionAttribute as CFString, posVal)
-            }
-
-            var liveBounds = CGRect(origin: req.origin, size: req.fallbackSize)
-            if req.windowID != 0,
-               let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], req.windowID) as? [[String: Any]],
-               let first = list.first,
-               let boundsDict = first[kCGWindowBounds as String] as? [String: Any],
-               let cgRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) {
-                liveBounds = cgRect
-            }
-
-            lock.lock()
-            let stillValid = (req.generation == generation)
-            lock.unlock()
-
-            if stillValid {
-                onLiveBounds(req.generation, req.windowID, liveBounds)
-            }
-        }
-    }
-}
-
 @MainActor
 @Observable
 public final class WindowChromeBarState {
@@ -104,8 +13,20 @@ public final class WindowChromeBarState {
     public var windowTitle: String = ""
     public var menuItems: [MirroredMenuItem] = []
     public var isMaximized: Bool = false
+    public var isNotchDocked: Bool = false
+    public var leftNotchWidth: CGFloat = 0
+    public var notchWidth: CGFloat = 0
+    public var rightNotchWidth: CGFloat = 0
     public var showSnapLayouts: Bool = false
     public var hoveredButton: String?
+}
+
+@MainActor
+@Observable
+private final class DragGhostState {
+    var appIcon: NSImage?
+    var title: String = ""
+    var barHeight: CGFloat = 28
 }
 
 @MainActor
@@ -113,13 +34,16 @@ public final class WindowChromeBarController: NSObject {
     private let model: RunningAppsModel
     private let snapManager: WindowSnapManager
     private let state = WindowChromeBarState()
+    private let dragGhostState = DragGhostState()
     private var panel: NonActivatingFloatingPanel?
     private var snapPanel: NonActivatingFloatingPanel?
+    private var dragGhostPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskView: TrafficLightMaskNSView?
     private var backgroundMasks: [CGWindowID: (panel: NonActivatingFloatingPanel, view: TrafficLightMaskNSView, pid: pid_t)] = [:]
     private var cachedMaskRelativeOffsets: [CGWindowID: CGRect] = [:]
     private weak var dragZoneNSView: NSView?
+    private weak var leftNotchDragZoneNSView: NSView?
     private var sampledMaskColors: [String: NSColor] = [:]
     private var pendingMaskColorKeys: Set<String> = []
     private var syncTimer: Timer?
@@ -137,10 +61,11 @@ public final class WindowChromeBarController: NSObject {
     private var dragStartMouseAX: CGPoint = .zero
     private var dragStartWindowFrameAX: CGRect = .zero
     private var dragWasMaximized = false
-    private var dragDidUnmaximize = false
+    private var dragDidStartVisualGhost = false
+    private var dragGhostWindowSizeAX: CGSize = .zero
+    private var dragGhostCurrentWindowOriginAX: CGPoint = .zero
+    private var dragGhostGrabOffsetAX: CGPoint = .zero
     private var dragMinSafeAXTop: CGFloat = 28
-    private let dragWorker = AXWindowDragWorker()
-    private var activeDragGeneration: UInt64 = 0
     private var lastAutoNormalizedFrameByWindowID: [CGWindowID: CGRect] = [:]
     private var mouseDragTap: CFMachPort?
     private var mouseDragRunLoopSource: CFRunLoopSource?
@@ -171,6 +96,7 @@ public final class WindowChromeBarController: NSObject {
             backing: .buffered,
             defer: false
         )
+        bar.allowsNotchAreaPlacement = true
         bar.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         bar.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         bar.backgroundColor = .clear
@@ -187,6 +113,9 @@ public final class WindowChromeBarController: NSObject {
             },
             onDragZoneReady: { [weak self] view in
                 self?.dragZoneNSView = view
+            },
+            onLeftDragZoneReady: { [weak self] view in
+                self?.leftNotchDragZoneNSView = view
             },
             onDragDelta: { [weak self] dx, dy in
                 self?.dragCurrentWindow(deltaX: dx, deltaY: dy)
@@ -318,7 +247,8 @@ public final class WindowChromeBarController: NSObject {
                 visibleFrameCocoa: screen.visibleFrame,
                 primaryScreenHeight: primaryH,
                 barHeight: CGFloat(model.config.windowBarHeight),
-                taskbarHeight: CGFloat(model.config.taskbarHeight)
+                taskbarHeight: CGFloat(model.config.taskbarHeight),
+                safeAreaTopInset: screen.safeAreaInsets.top
             ) {
                 if lastAutoNormalizedFrameByWindowID[win.windowID] != win.axFrame,
                    let normalized = WindowChromeGeometry.normalizedAXFrame(
@@ -327,7 +257,8 @@ public final class WindowChromeBarController: NSObject {
                     visibleFrameCocoa: screen.visibleFrame,
                     primaryScreenHeight: primaryH,
                     barHeight: CGFloat(model.config.windowBarHeight),
-                    taskbarHeight: CGFloat(model.config.taskbarHeight)
+                    taskbarHeight: CGFloat(model.config.taskbarHeight),
+                    safeAreaTopInset: screen.safeAreaInsets.top
                    ) {
                     lastAutoNormalizedFrameByWindowID[win.windowID] = win.axFrame
                     AccessibilityBridge.setFrame(win.element, axFrame: normalized)
@@ -348,17 +279,21 @@ public final class WindowChromeBarController: NSObject {
             }
         }
 
-        guard let barRect = WindowChromeGeometry.dockedBarFrame(
+        guard let layout = WindowChromeGeometry.dockedBarLayout(
             forAXWindowFrame: effectiveWin.axFrame,
             primaryScreenHeight: primaryH,
             screenFrameCocoa: effectiveScreen.frame,
             visibleFrameCocoa: effectiveScreen.visibleFrame,
+            safeAreaTopInset: effectiveScreen.safeAreaInsets.top,
+            auxiliaryTopLeftWidth: effectiveScreen.auxiliaryTopLeftArea?.width ?? 0,
+            auxiliaryTopRightWidth: effectiveScreen.auxiliaryTopRightArea?.width ?? 0,
             barHeight: CGFloat(model.config.windowBarHeight),
             taskbarHeight: CGFloat(model.config.taskbarHeight)
         ) else {
             hideBar()
             return
         }
+        let barRect = layout.frameCocoa
 
         let pid = front.processIdentifier
         currentWindow = effectiveWin
@@ -367,6 +302,10 @@ public final class WindowChromeBarController: NSObject {
         state.appIcon = AppIconCache.icon(forBundleID: bundleID, url: front.bundleURL, size: 16)
         state.windowTitle = effectiveWin.title.isEmpty ? state.appName : effectiveWin.title
         state.isMaximized = snapManager.isWindowMaximized(effectiveWin, on: effectiveScreen)
+        state.isNotchDocked = layout.isNotchDocked
+        state.leftNotchWidth = layout.leftNotchWidth
+        state.notchWidth = layout.notchWidth
+        state.rightNotchWidth = layout.rightNotchWidth
 
         // Cache menu bar items per PID — only query AXMenuBar when active PID changes
         if pid != lastMenuPID {
@@ -403,6 +342,7 @@ public final class WindowChromeBarController: NSObject {
         currentWindow = nil
         panel?.orderOut(nil)
         snapPanel?.orderOut(nil)
+        dragGhostPanel?.orderOut(nil)
         trafficLightMaskPanel?.orderOut(nil)
         if !model.config.showWindowChromeBar {
             hideAllBackgroundMasks()
@@ -446,17 +386,26 @@ public final class WindowChromeBarController: NSObject {
         guard let screen = AccessibilityBridge.screenContaining(axFrame: liveBounds)
             ?? NSScreen.main
             ?? NSScreen.screens.first,
-            let barRect = WindowChromeGeometry.dockedBarFrame(
+            let layout = WindowChromeGeometry.dockedBarLayout(
                 forAXWindowFrame: liveBounds,
                 primaryScreenHeight: primaryScreenHeight,
                 screenFrameCocoa: screen.frame,
                 visibleFrameCocoa: screen.visibleFrame,
+                safeAreaTopInset: screen.safeAreaInsets.top,
+                auxiliaryTopLeftWidth: screen.auxiliaryTopLeftArea?.width ?? 0,
+                auxiliaryTopRightWidth: screen.auxiliaryTopRightArea?.width ?? 0,
                 barHeight: CGFloat(model.config.windowBarHeight),
                 taskbarHeight: CGFloat(model.config.taskbarHeight)
             )
         else {
             return nil
         }
+
+        state.isNotchDocked = layout.isNotchDocked
+        state.leftNotchWidth = layout.leftNotchWidth
+        state.notchWidth = layout.notchWidth
+        state.rightNotchWidth = layout.rightNotchWidth
+        let barRect = layout.frameCocoa
 
         if let panel {
             setPanelFrameFast(panel, to: barRect)
@@ -860,7 +809,7 @@ public final class WindowChromeBarController: NSObject {
     }
 
     public func stopMouseDragTap() {
-        dragWorker.cancelSession()
+        dragGhostPanel?.orderOut(nil)
         fastDragSyncTimer?.invalidate()
         fastDragSyncTimer = nil
         if let tap = mouseDragTap {
@@ -874,6 +823,7 @@ public final class WindowChromeBarController: NSObject {
         isDraggingTargetWindow = false
         isExternalMouseDragging = false
         isBlockingNativeTitlebarDrag = false
+        dragDidStartVisualGhost = false
         snapManager.suppressGlobalDragMonitor = false
         hideAllBackgroundMasks()
     }
@@ -911,17 +861,59 @@ public final class WindowChromeBarController: NSObject {
         return swallow ? nil : Unmanaged.passUnretained(event)
     }
 
-    private func dragZoneScreenRectCocoa() -> CGRect? {
-        guard let panel, panel.isVisible else { return nil }
+    private func isPointInDragZone(_ cocoaPt: NSPoint) -> Bool {
+        guard let panel, panel.isVisible else { return false }
         if let view = dragZoneNSView, view.window === panel, view.bounds.width > 8 {
-            let rectInWin = view.convert(view.bounds, to: nil)
-            return panel.convertToScreen(rectInWin)
+            let screenRect = panel.convertToScreen(view.convert(view.bounds, to: nil))
+            if screenRect.contains(cocoaPt) {
+                return true
+            }
+        }
+        if state.isNotchDocked,
+           let leftView = leftNotchDragZoneNSView,
+           leftView.window === panel,
+           leftView.bounds.width > 8 {
+            let screenRect = panel.convertToScreen(leftView.convert(leftView.bounds, to: nil))
+            if screenRect.contains(cocoaPt) {
+                return true
+            }
+        }
+        if dragZoneNSView != nil {
+            return false
         }
         let f = panel.frame
         let leftInset: CGFloat = min(220, f.width * 0.35)
         let rightInset: CGFloat = 126
-        guard f.width > leftInset + rightInset else { return nil }
-        return CGRect(x: f.minX + leftInset, y: f.minY, width: f.width - leftInset - rightInset, height: f.height)
+        guard f.width > leftInset + rightInset else { return false }
+        let fallbackRect = CGRect(
+            x: f.minX + leftInset,
+            y: f.minY,
+            width: f.width - leftInset - rightInset,
+            height: f.height
+        )
+        return fallbackRect.contains(cocoaPt)
+    }
+
+    private func ensureDragGhostPanel() -> NonActivatingFloatingPanel {
+        if let existing = dragGhostPanel {
+            return existing
+        }
+        let p = NonActivatingFloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.allowsNotchAreaPlacement = true
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.hasShadow = false
+        p.ignoresMouseEvents = true
+        p.contentView = NSHostingView(rootView: DragGhostPreviewView(state: dragGhostState))
+        dragGhostPanel = p
+        return p
     }
 
     private func focusBackgroundWindow(pid: pid_t, windowID: CGWindowID) {
@@ -940,10 +932,10 @@ public final class WindowChromeBarController: NSObject {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
 
-        // 1. Clicks inside our 28pt chrome bar
+        // 1. Clicks inside our chrome bar
         if let panel, panel.isVisible, panel.frame.contains(cocoaPt) {
             if let win = currentWindow,
-               dragZoneScreenRectCocoa()?.contains(cocoaPt) == true {
+               isPointInDragZone(cocoaPt) {
                 if clickCount == 2 {
                     DispatchQueue.main.async { [weak self] in
                         self?.toggleMaximizeCurrentWindow()
@@ -955,8 +947,8 @@ public final class WindowChromeBarController: NSObject {
                 let screen = AccessibilityBridge.screenContaining(axFrame: fastFrame) ?? NSScreen.main ?? NSScreen.screens.first
                 let barH = CGFloat(model.config.windowBarHeight)
                 let screenTopAX = screen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
+                let topSafeReserve = (screen?.safeAreaInsets.top ?? 0) >= barH ? 0 : barH
 
-                activeDragGeneration = dragWorker.beginSession()
                 dragTargetWindow = AXWindowInfo(
                     pid: win.pid,
                     windowID: win.windowID,
@@ -969,8 +961,14 @@ public final class WindowChromeBarController: NSObject {
                 dragStartMouseAX = locationAX
                 dragStartWindowFrameAX = fastFrame
                 dragWasMaximized = screen.map { snapManager.isWindowMaximized(dragTargetWindow!, on: $0) } ?? false
-                dragDidUnmaximize = false
-                dragMinSafeAXTop = screenTopAX + barH
+                dragDidStartVisualGhost = false
+                dragGhostWindowSizeAX = fastFrame.size
+                dragGhostCurrentWindowOriginAX = fastFrame.origin
+                dragGhostGrabOffsetAX = CGPoint(
+                    x: locationAX.x - fastFrame.minX,
+                    y: locationAX.y - fastFrame.minY
+                )
+                dragMinSafeAXTop = screenTopAX + topSafeReserve
                 isDraggingTargetWindow = true
                 snapManager.suppressGlobalDragMonitor = true
                 snapPanel?.orderOut(nil)
@@ -1078,94 +1076,75 @@ public final class WindowChromeBarController: NSObject {
             return false
         }
 
-        var dx = locationAX.x - dragStartMouseAX.x
-        var dy = locationAX.y - dragStartMouseAX.y
+        let dx = locationAX.x - dragStartMouseAX.x
+        let dy = locationAX.y - dragStartMouseAX.y
+        let barH = CGFloat(model.config.windowBarHeight)
 
-        if dragWasMaximized && !dragDidUnmaximize && hypot(dx, dy) > 10 {
-            dragDidUnmaximize = true
-            let bid = currentBundleID.isEmpty ? (NSRunningApplication(processIdentifier: win.pid)?.bundleIdentifier ?? "") : currentBundleID
-            if let restored = snapManager.restoreFrameForDrag(window: win, bundleID: bid, cursorAX: locationAX) {
-                let updatedWin = AXWindowInfo(
-                    pid: win.pid,
-                    windowID: win.windowID,
-                    title: win.title,
-                    axFrame: restored,
-                    isMinimized: win.isMinimized,
-                    isFullScreen: win.isFullScreen,
-                    element: win.element
-                )
-                dragTargetWindow = updatedWin
-                currentWindow = updatedWin
-                dragStartWindowFrameAX = restored
-                dragStartMouseAX = locationAX
-                dx = 0
-                dy = 0
+        if !dragDidStartVisualGhost {
+            guard hypot(dx, dy) >= 3 else {
+                return true
+            }
+            dragDidStartVisualGhost = true
 
-                let primaryH = AccessibilityBridge.primaryScreenHeight()
-                if let barAXRect = applyOverlayFramesFast(
-                    forLiveBounds: restored,
-                    windowID: win.windowID,
-                    primaryScreenHeight: primaryH,
-                    includeBackgroundMasks: false
-                ) {
-                    updateBackgroundMaskOcclusionInMemory(
-                        draggedWindowAXFrame: restored,
-                        draggedBarAXRect: barAXRect
-                    )
+            if dragWasMaximized {
+                let bid = currentBundleID.isEmpty
+                    ? (NSRunningApplication(processIdentifier: win.pid)?.bundleIdentifier ?? "")
+                    : currentBundleID
+                let screen = AccessibilityBridge.screenContaining(axFrame: dragStartWindowFrameAX)
+                    ?? NSScreen.main
+                    ?? NSScreen.screens.first
+                let restoredSize = screen.map {
+                    snapManager.restoreSizeForDrag(window: win, bundleID: bid, on: $0)
+                } ?? CGSize(width: 1200, height: 780)
+                dragGhostWindowSizeAX = restoredSize
+                dragGhostGrabOffsetAX = CGPoint(x: restoredSize.width / 2, y: -(barH / 2))
+            } else {
+                dragGhostWindowSizeAX = dragStartWindowFrameAX.size
+                if dragGhostGrabOffsetAX.y > 0 {
+                    dragGhostGrabOffsetAX.y = -(barH / 2)
                 }
             }
-            return true
+
+            panel?.orderOut(nil)
+            dragGhostState.appIcon = state.appIcon
+            dragGhostState.title = state.windowTitle
+            dragGhostState.barHeight = barH
+
+            let targetWinX = (locationAX.x - dragGhostGrabOffsetAX.x).rounded()
+            let targetWinY = max(dragMinSafeAXTop, (locationAX.y - dragGhostGrabOffsetAX.y).rounded())
+            dragGhostCurrentWindowOriginAX = CGPoint(x: targetWinX, y: targetWinY)
+
+            let primaryH = AccessibilityBridge.primaryScreenHeight()
+            let ghostAXRect = CGRect(
+                x: targetWinX,
+                y: targetWinY - barH,
+                width: dragGhostWindowSizeAX.width,
+                height: dragGhostWindowSizeAX.height + barH
+            )
+            let ghostCocoaRect = WindowChromeGeometry.axRectToCocoa(ghostAXRect, primaryScreenHeight: primaryH)
+            let ghostPanel = ensureDragGhostPanel()
+            ghostPanel.setFrame(ghostCocoaRect, display: true)
+            ghostPanel.orderFrontRegardless()
         }
 
-        let targetX = (dragStartWindowFrameAX.origin.x + dx).rounded()
-        let targetY = max(dragMinSafeAXTop, dragStartWindowFrameAX.origin.y + dy).rounded()
-        let newOriginAX = CGPoint(x: targetX, y: targetY)
+        let targetWinX = (locationAX.x - dragGhostGrabOffsetAX.x).rounded()
+        let targetWinY = max(dragMinSafeAXTop, (locationAX.y - dragGhostGrabOffsetAX.y).rounded())
+        dragGhostCurrentWindowOriginAX = CGPoint(x: targetWinX, y: targetWinY)
 
-        let req = DragMoveRequest(
-            generation: activeDragGeneration,
-            element: win.element,
-            windowID: win.windowID,
-            origin: newOriginAX,
-            fallbackSize: dragStartWindowFrameAX.size
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let ghostAXRect = CGRect(
+            x: targetWinX,
+            y: targetWinY - barH,
+            width: dragGhostWindowSizeAX.width,
+            height: dragGhostWindowSizeAX.height + barH
         )
-
-        dragWorker.submit(req) { [weak self] gen, wid, liveBounds in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.isDraggingTargetWindow,
-                      self.activeDragGeneration == gen
-                else {
-                    return
-                }
-                if let cur = self.dragTargetWindow, cur.windowID == wid {
-                    let updated = AXWindowInfo(
-                        pid: cur.pid,
-                        windowID: cur.windowID,
-                        title: cur.title,
-                        axFrame: liveBounds,
-                        isMinimized: cur.isMinimized,
-                        isFullScreen: cur.isFullScreen,
-                        element: cur.element
-                    )
-                    self.dragTargetWindow = updated
-                    self.currentWindow = updated
-                }
-
-                let primaryH = AccessibilityBridge.primaryScreenHeight()
-                if let barAXRect = self.applyOverlayFramesFast(
-                    forLiveBounds: liveBounds,
-                    windowID: wid,
-                    primaryScreenHeight: primaryH,
-                    includeBackgroundMasks: false
-                ) {
-                    self.updateBackgroundMaskOcclusionInMemory(
-                        draggedWindowAXFrame: liveBounds,
-                        draggedBarAXRect: barAXRect
-                    )
-                }
-                self.snapManager.updateDragPreview(mouseLocationCocoa: NSEvent.mouseLocation)
-            }
+        let ghostCocoaRect = WindowChromeGeometry.axRectToCocoa(ghostAXRect, primaryScreenHeight: primaryH)
+        if let ghostPanel = dragGhostPanel {
+            setPanelFrameFast(ghostPanel, to: ghostCocoaRect)
         }
+
+        let cocoaMouse = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
+        snapManager.updateDragPreview(mouseLocationCocoa: cocoaMouse)
         return true
     }
 
@@ -1190,17 +1169,30 @@ public final class WindowChromeBarController: NSObject {
 
         let win = dragTargetWindow ?? currentWindow
         let bid = currentBundleID.isEmpty ? nil : currentBundleID
-        dragWorker.cancelSession()
+        let didMove = dragDidStartVisualGhost
+        let wasMax = dragWasMaximized
+        let finalAXFrame = CGRect(origin: dragGhostCurrentWindowOriginAX, size: dragGhostWindowSizeAX)
+
+        dragGhostPanel?.orderOut(nil)
         isDraggingTargetWindow = false
+        dragDidStartVisualGhost = false
         dragTargetWindow = nil
         snapManager.suppressGlobalDragMonitor = false
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            _ = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
+            let didSnap = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
+            if !didSnap && didMove, let win {
+                if wasMax {
+                    self.snapManager.clearSavedRestoreFrame(for: win, bundleID: bid ?? "")
+                    AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
+                } else {
+                    AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
+                }
+            }
             self.syncActiveWindow()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
             self?.syncActiveWindow()
         }
         return true
@@ -1414,6 +1406,7 @@ private struct WindowChromeBarView: View {
     let onMenuClick: (MirroredMenuItem, NSView) -> Void
     let onOverflowMenusClick: ([MirroredMenuItem], NSView) -> Void
     let onDragZoneReady: (NSView) -> Void
+    let onLeftDragZoneReady: (NSView) -> Void
     let onDragDelta: (CGFloat, CGFloat) -> Void
     let onDragEnded: () -> Void
     let onDoubleClickTitle: () -> Void
@@ -1423,73 +1416,209 @@ private struct WindowChromeBarView: View {
     let onHoverMaximize: (Bool, NSRect) -> Void
 
     var body: some View {
+        let barHeight: CGFloat = state.isNotchDocked ? 38 : 28
+        Group {
+            if state.isNotchDocked {
+                HStack(spacing: 0) {
+                    HStack(spacing: 0) {
+                        menuStrip(visibleCount: 6)
+                        ChromeTitleDragArea(
+                            title: "",
+                            onViewReady: onLeftDragZoneReady,
+                            onDragDelta: onDragDelta,
+                            onDragEnded: onDragEnded,
+                            onDoubleClick: onDoubleClickTitle
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(width: state.leftNotchWidth)
+                    .frame(maxHeight: .infinity)
+
+                    Color.black
+                        .frame(width: state.notchWidth)
+                        .frame(maxHeight: .infinity)
+
+                    HStack(spacing: 0) {
+                        ChromeTitleDragArea(
+                            title: state.windowTitle,
+                            onViewReady: onDragZoneReady,
+                            onDragDelta: onDragDelta,
+                            onDragEnded: onDragEnded,
+                            onDoubleClick: onDoubleClickTitle
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        captionButtons(height: barHeight)
+                    }
+                    .frame(width: state.rightNotchWidth)
+                    .frame(maxHeight: .infinity)
+                }
+            } else {
+                HStack(spacing: 0) {
+                    menuStrip(visibleCount: 7)
+
+                    ChromeTitleDragArea(
+                        title: state.windowTitle,
+                        onViewReady: onDragZoneReady,
+                        onDragDelta: onDragDelta,
+                        onDragEnded: onDragEnded,
+                        onDoubleClick: onDoubleClickTitle
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    captionButtons(height: barHeight)
+                }
+            }
+        }
+        .frame(height: barHeight)
+        .background(
+            Group {
+                if state.isNotchDocked {
+                    Color.black
+                } else {
+                    AcrylicBackground(material: .titlebar)
+                }
+            }
+            .overlay(
+                Rectangle()
+                    .frame(height: 0.5)
+                    .foregroundStyle(Color.white.opacity(state.isNotchDocked ? 0.14 : 0.12)),
+                alignment: .bottom
+            )
+        )
+    }
+
+    @ViewBuilder
+    private func menuStrip(visibleCount: Int) -> some View {
+        HStack(spacing: 4) {
+            if let icon = state.appIcon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 15, height: 15)
+                    .padding(.leading, 8)
+            }
+
+            let visibleMenus = Array(state.menuItems.prefix(visibleCount))
+            let overflowMenus = Array(state.menuItems.dropFirst(visibleCount))
+
+            ForEach(Array(visibleMenus.enumerated()), id: \.offset) { _, item in
+                MenuAnchorButton(title: item.title) { anchorView in
+                    onMenuClick(item, anchorView)
+                }
+            }
+
+            if !overflowMenus.isEmpty {
+                MenuAnchorButton(title: "•••") { anchorView in
+                    onOverflowMenusClick(overflowMenus, anchorView)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func captionButtons(height: CGFloat) -> some View {
         HStack(spacing: 0) {
-            // App icon + live self-contained menu bar
-            HStack(spacing: 4) {
+            CaptionButton(symbol: "minus", hoverColor: Color.primary.opacity(0.12), height: height, action: onMinimize)
+
+            CaptionButton(
+                symbol: state.isMaximized ? "square.on.square" : "square",
+                hoverColor: Color.primary.opacity(0.12),
+                height: height,
+                action: onMaximize,
+                onHoverWithScreenRect: { hovering, rect in
+                    onHoverMaximize(hovering, rect)
+                }
+            )
+
+            CaptionButton(
+                symbol: "xmark",
+                hoverColor: Color(red: 0.77, green: 0.17, blue: 0.11),
+                hoverForeground: .white,
+                height: height,
+                action: onClose
+            )
+        }
+    }
+}
+
+private struct DragGhostPreviewView: View {
+    let state: DragGhostState
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
                 if let icon = state.appIcon {
                     Image(nsImage: icon)
                         .resizable()
                         .frame(width: 15, height: 15)
-                        .padding(.leading, 8)
+                        .padding(.leading, 10)
                 }
 
-                let visibleMenus = Array(state.menuItems.prefix(7))
-                let overflowMenus = Array(state.menuItems.dropFirst(7))
+                Text(state.title)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-                ForEach(Array(visibleMenus.enumerated()), id: \.offset) { _, item in
-                    MenuAnchorButton(title: item.title) { anchorView in
-                        onMenuClick(item, anchorView)
-                    }
-                }
+                Spacer()
 
-                if !overflowMenus.isEmpty {
-                    MenuAnchorButton(title: "•••") { anchorView in
-                        onOverflowMenusClick(overflowMenus, anchorView)
-                    }
+                HStack(spacing: 0) {
+                    ghostCaptionGlyph("minus")
+                    ghostCaptionGlyph("square")
+                    ghostCaptionGlyph("xmark")
                 }
             }
-
-            // Draggable title strip
-            ChromeTitleDragArea(
-                title: state.windowTitle,
-                onViewReady: onDragZoneReady,
-                onDragDelta: onDragDelta,
-                onDragEnded: onDragEnded,
-                onDoubleClick: onDoubleClickTitle
+            .frame(height: state.barHeight)
+            .background(Color(red: 0.10, green: 0.10, blue: 0.12).opacity(0.94))
+            .overlay(
+                Rectangle()
+                    .frame(height: 0.5)
+                    .foregroundStyle(Color.white.opacity(0.16)),
+                alignment: .bottom
             )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // Right-side Windows 11 caption buttons: — □ ✕
-            HStack(spacing: 0) {
-                CaptionButton(symbol: "minus", hoverColor: Color.primary.opacity(0.12), action: onMinimize)
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.24))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.08))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.35), lineWidth: 1.5)
 
-                CaptionButton(
-                    symbol: state.isMaximized ? "square.on.square" : "square",
-                    hoverColor: Color.primary.opacity(0.12),
-                    action: onMaximize,
-                    onHoverWithScreenRect: { hovering, rect in
-                        onHoverMaximize(hovering, rect)
+                HStack(spacing: 8) {
+                    if let icon = state.appIcon {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .frame(width: 18, height: 18)
                     }
-                )
-
-                CaptionButton(
-                    symbol: "xmark",
-                    hoverColor: Color(red: 0.77, green: 0.17, blue: 0.11),
-                    hoverForeground: .white,
-                    action: onClose
+                    Text(state.title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.black.opacity(0.45))
                 )
             }
         }
-        .frame(height: 28)
-        .background(
-            AcrylicBackground(material: .titlebar)
-                .overlay(
-                    Rectangle()
-                        .frame(height: 0.5)
-                        .foregroundStyle(Color.white.opacity(0.12)),
-                    alignment: .bottom
-                )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
         )
+    }
+
+    private func ghostCaptionGlyph(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.65))
+            .frame(width: 42, height: state.barHeight)
     }
 }
 
@@ -1540,6 +1669,7 @@ private struct CaptionButton: View {
     let symbol: String
     let hoverColor: Color
     var hoverForeground: Color = .primary
+    var height: CGFloat = 28
     let action: () -> Void
     var onHoverWithScreenRect: ((Bool, NSRect) -> Void)?
 
@@ -1551,7 +1681,7 @@ private struct CaptionButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(hovered ? hoverForeground : .primary)
-                .frame(width: 42, height: 28)
+                .frame(width: 42, height: height)
                 .background(hovered ? hoverColor : .clear)
         }
         .buttonStyle(.plain)

@@ -359,4 +359,85 @@ struct Win11ShellCoreTests {
             taskbarHeight: 48
         ))
     }
+
+    @Test("Notch-integrated maximize and dockedBarLayout split cleanly around the 220pt hardware notch with zero top gap")
+    func notchIntegratedMaximizeAndLayout() {
+        let primaryH: CGFloat = 1169
+        let screen = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+        let visible = CGRect(x: 0, y: 0, width: 1800, height: 1131)
+
+        let maxNotchedAX = WindowChromeGeometry.maximizedAXFrame(
+            forScreenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        )
+        #expect(maxNotchedAX == CGRect(x: 0, y: 38, width: 1800, height: 1083))
+
+        let notchedLayout = WindowChromeGeometry.dockedBarLayout(
+            forAXWindowFrame: maxNotchedAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            safeAreaTopInset: 38,
+            auxiliaryTopLeftWidth: 790,
+            auxiliaryTopRightWidth: 790,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(notchedLayout == DockedBarLayout(
+            frameCocoa: CGRect(x: 0, y: 1131, width: 1800, height: 38),
+            isNotchDocked: true,
+            leftNotchWidth: 790,
+            notchWidth: 220,
+            rightNotchWidth: 790
+        ))
+
+        let floatingAX = CGRect(x: 200, y: 180, width: 1000, height: 600)
+        let floatingLayout = WindowChromeGeometry.dockedBarLayout(
+            forAXWindowFrame: floatingAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            safeAreaTopInset: 38,
+            auxiliaryTopLeftWidth: 790,
+            auxiliaryTopRightWidth: 790,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(floatingLayout != nil)
+        #expect(floatingLayout?.isNotchDocked == false)
+        #expect(floatingLayout?.frameCocoa == CGRect(x: 200, y: 989, width: 1000, height: 28))
+
+        #expect(!WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: maxNotchedAX,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        ))
+        #expect(WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: CGRect(x: 0, y: 38, width: 1800, height: 1131),
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        ))
+        let normalizedNotched = WindowChromeGeometry.normalizedAXFrame(
+            forAXWindowFrame: CGRect(x: 0, y: 38, width: 1800, height: 1131),
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        )
+        #expect(normalizedNotched == maxNotchedAX)
+    }
 }

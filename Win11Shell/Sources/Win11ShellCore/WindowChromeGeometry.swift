@@ -13,6 +13,28 @@ public enum WindowSnapZone: String, CaseIterable, Equatable, Sendable {
     case maximized
 }
 
+public struct DockedBarLayout: Equatable, Sendable {
+    public let frameCocoa: CGRect
+    public let isNotchDocked: Bool
+    public let leftNotchWidth: CGFloat
+    public let notchWidth: CGFloat
+    public let rightNotchWidth: CGFloat
+
+    public init(
+        frameCocoa: CGRect,
+        isNotchDocked: Bool,
+        leftNotchWidth: CGFloat,
+        notchWidth: CGFloat,
+        rightNotchWidth: CGFloat
+    ) {
+        self.frameCocoa = frameCocoa
+        self.isNotchDocked = isNotchDocked
+        self.leftNotchWidth = leftNotchWidth
+        self.notchWidth = notchWidth
+        self.rightNotchWidth = rightNotchWidth
+    }
+}
+
 public enum WindowChromeGeometry {
     /// Converts a window frame in Accessibility coordinates (top-left primary screen origin, +Y down)
     /// to Cocoa screen coordinates (bottom-left primary screen origin, +Y up).
@@ -25,6 +47,71 @@ public enum WindowChromeGeometry {
     public static func cocoaRectToAX(_ cocoaRect: CGRect, primaryScreenHeight: CGFloat) -> CGRect {
         let axY = primaryScreenHeight - (cocoaRect.origin.y + cocoaRect.height)
         return CGRect(x: cocoaRect.origin.x, y: axY, width: cocoaRect.width, height: cocoaRect.height)
+    }
+
+    /// Computes both the Cocoa frame and notch-docking geometry for the chrome bar of `axWindowFrame`.
+    /// On notched MacBook Pro screens (`safeAreaTopInset >= barHeight`), when the window's top approaches
+    /// the notch bezel (`cocoaWindow.maxY + barHeight > maxVisibleTop`), the chrome bar docks directly
+    /// into the 38pt notch band split around the camera notch so maximized windows have zero top gap.
+    public static func dockedBarLayout(
+        forAXWindowFrame axWindowFrame: CGRect,
+        primaryScreenHeight: CGFloat,
+        screenFrameCocoa: CGRect,
+        visibleFrameCocoa: CGRect,
+        safeAreaTopInset: CGFloat,
+        auxiliaryTopLeftWidth: CGFloat,
+        auxiliaryTopRightWidth: CGFloat,
+        barHeight: CGFloat,
+        taskbarHeight: CGFloat
+    ) -> DockedBarLayout? {
+        guard axWindowFrame.width >= 220, axWindowFrame.height >= 100 else {
+            return nil
+        }
+
+        let cocoaWindow = axRectToCocoa(axWindowFrame, primaryScreenHeight: primaryScreenHeight)
+        let fillsWidth = abs(cocoaWindow.width - screenFrameCocoa.width) < 4
+        let fillsHeight = abs(cocoaWindow.height - screenFrameCocoa.height) < 4
+        if fillsWidth && fillsHeight {
+            return nil
+        }
+
+        let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
+        if safeAreaTopInset >= barHeight && (cocoaWindow.maxY + barHeight) > (maxVisibleTop + 0.5) {
+            let bezelRect = CGRect(
+                x: screenFrameCocoa.minX,
+                y: screenFrameCocoa.maxY - safeAreaTopInset,
+                width: screenFrameCocoa.width,
+                height: safeAreaTopInset
+            )
+            let leftW = auxiliaryTopLeftWidth > 100 ? auxiliaryTopLeftWidth : (screenFrameCocoa.width - 220) / 2
+            let rightW = auxiliaryTopRightWidth > 100 ? auxiliaryTopRightWidth : (screenFrameCocoa.width - 220) / 2
+            let notchW = max(0, screenFrameCocoa.width - leftW - rightW)
+            return DockedBarLayout(
+                frameCocoa: bezelRect,
+                isNotchDocked: true,
+                leftNotchWidth: leftW,
+                notchWidth: notchW,
+                rightNotchWidth: rightW
+            )
+        }
+
+        guard let rect = dockedBarFrame(
+            forAXWindowFrame: axWindowFrame,
+            primaryScreenHeight: primaryScreenHeight,
+            screenFrameCocoa: screenFrameCocoa,
+            visibleFrameCocoa: visibleFrameCocoa,
+            barHeight: barHeight,
+            taskbarHeight: taskbarHeight
+        ) else {
+            return nil
+        }
+        return DockedBarLayout(
+            frameCocoa: rect,
+            isNotchDocked: false,
+            leftNotchWidth: 0,
+            notchWidth: 0,
+            rightNotchWidth: 0
+        )
     }
 
     /// Computes the Cocoa frame for the 28pt Window Chrome Bar docked flush above `axWindowFrame`.
@@ -65,15 +152,18 @@ public enum WindowChromeGeometry {
     }
 
     /// Computes the Accessibility frame for a maximized window on the given screen,
-    /// reserving `barHeight` at the top (respecting notch/safe visibleFrame maxY) and `taskbarHeight` at the bottom.
+    /// reserving `barHeight` below `visibleFrame.maxY` on non-notched screens or docking cleanly flush
+    /// beneath the 38pt notch chrome bar when `safeAreaTopInset >= barHeight`, plus `taskbarHeight` at the bottom.
     public static func maximizedAXFrame(
         forScreenFrameCocoa screenFrameCocoa: CGRect,
         visibleFrameCocoa: CGRect,
         primaryScreenHeight: CGFloat,
         barHeight: CGFloat,
-        taskbarHeight: CGFloat
+        taskbarHeight: CGFloat,
+        safeAreaTopInset: CGFloat = 0
     ) -> CGRect {
-        let topLimitCocoa = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY) - barHeight
+        let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
+        let topLimitCocoa = (safeAreaTopInset >= barHeight) ? maxVisibleTop : (maxVisibleTop - barHeight)
         let bottomLimitCocoa = screenFrameCocoa.minY + taskbarHeight
         let targetHeight = max(120, topLimitCocoa - bottomLimitCocoa)
         let cocoaTarget = CGRect(
@@ -92,14 +182,16 @@ public enum WindowChromeGeometry {
         visibleFrameCocoa: CGRect,
         primaryScreenHeight: CGFloat,
         barHeight: CGFloat,
-        taskbarHeight: CGFloat
+        taskbarHeight: CGFloat,
+        safeAreaTopInset: CGFloat = 0
     ) -> CGRect {
         let fullMaxAX = maximizedAXFrame(
             forScreenFrameCocoa: screenFrameCocoa,
             visibleFrameCocoa: visibleFrameCocoa,
             primaryScreenHeight: primaryScreenHeight,
             barHeight: barHeight,
-            taskbarHeight: taskbarHeight
+            taskbarHeight: taskbarHeight,
+            safeAreaTopInset: safeAreaTopInset
         )
 
         switch zone {
@@ -125,15 +217,16 @@ public enum WindowChromeGeometry {
         }
     }
 
-    /// Returns a clamped AX frame when a standard non-fullscreen window extends into the top chrome bar
-    /// (`visibleFrame.maxY - barHeight`) or bottom taskbar (`screenFrame.minY + taskbarHeight`), or `nil` if already clean.
+    /// Returns a clamped AX frame when a standard non-fullscreen window extends into the top bar band
+    /// or bottom taskbar (`screenFrame.minY + taskbarHeight`), or `nil` if already clean.
     public static func normalizedAXFrame(
         forAXWindowFrame axFrame: CGRect,
         screenFrameCocoa: CGRect,
         visibleFrameCocoa: CGRect,
         primaryScreenHeight: CGFloat,
         barHeight: CGFloat,
-        taskbarHeight: CGFloat
+        taskbarHeight: CGFloat,
+        safeAreaTopInset: CGFloat = 0
     ) -> CGRect? {
         guard axFrame.width >= 100, axFrame.height >= 100 else {
             return nil
@@ -147,7 +240,8 @@ public enum WindowChromeGeometry {
         }
 
         let workMinY = screenFrameCocoa.minY + taskbarHeight
-        let workMaxY = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY) - barHeight
+        let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
+        let workMaxY = (safeAreaTopInset >= barHeight) ? maxVisibleTop : (maxVisibleTop - barHeight)
         let workHeight = max(120, workMaxY - workMinY)
 
         let extendsAbove = cocoa.maxY > workMaxY + 0.5
@@ -336,7 +430,8 @@ public enum WindowChromeGeometry {
         visibleFrameCocoa: CGRect,
         primaryScreenHeight: CGFloat,
         barHeight: CGFloat,
-        taskbarHeight: CGFloat
+        taskbarHeight: CGFloat,
+        safeAreaTopInset: CGFloat = 0
     ) -> Bool {
         guard normalizedAXFrame(
             forAXWindowFrame: axFrame,
@@ -344,14 +439,16 @@ public enum WindowChromeGeometry {
             visibleFrameCocoa: visibleFrameCocoa,
             primaryScreenHeight: primaryScreenHeight,
             barHeight: barHeight,
-            taskbarHeight: taskbarHeight
+            taskbarHeight: taskbarHeight,
+            safeAreaTopInset: safeAreaTopInset
         ) != nil else {
             return false
         }
 
         let cocoa = axRectToCocoa(axFrame, primaryScreenHeight: primaryScreenHeight)
         let workMinY = screenFrameCocoa.minY + taskbarHeight
-        let workMaxY = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY) - barHeight
+        let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
+        let workMaxY = (safeAreaTopInset >= barHeight) ? maxVisibleTop : (maxVisibleTop - barHeight)
         let workHeight = max(120, workMaxY - workMinY)
 
         if cocoa.maxY > workMaxY + 1.0 {

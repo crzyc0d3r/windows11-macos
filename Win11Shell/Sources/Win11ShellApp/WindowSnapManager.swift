@@ -108,7 +108,8 @@ public final class WindowSnapManager {
             visibleFrameCocoa: screen.visibleFrame,
             primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
             barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
         )
         AccessibilityBridge.setFrame(win.element, axFrame: targetAX)
         cancelDragPreview()
@@ -121,7 +122,8 @@ public final class WindowSnapManager {
             visibleFrameCocoa: screen.visibleFrame,
             primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
             barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
         )
         return abs(win.axFrame.width - maxAX.width) < 24
             && abs(win.axFrame.height - maxAX.height) < 24
@@ -134,11 +136,21 @@ public final class WindowSnapManager {
             visibleFrameCocoa: screen.visibleFrame,
             primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
             barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
         )
         let coversWidth = win.axFrame.width >= screen.frame.width - 20
         let coversHeight = win.axFrame.height >= maxAX.height - 20
         return !(coversWidth && coversHeight)
+    }
+
+    public func restoreSizeForDrag(window: AXWindowInfo, bundleID: String, on screen: NSScreen) -> CGSize {
+        let key = windowKey(window, bundleID: bundleID)
+        return (savedRestoreFrames[key] ?? centeredRestoreAXFrame(on: screen)).size
+    }
+
+    public func clearSavedRestoreFrame(for window: AXWindowInfo, bundleID: String) {
+        savedRestoreFrames.removeValue(forKey: windowKey(window, bundleID: bundleID))
     }
 
     public func restoreFrameForDrag(window: AXWindowInfo, bundleID: String, cursorAX: CGPoint) -> CGRect? {
@@ -150,7 +162,7 @@ public final class WindowSnapManager {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let barH = CGFloat(model.config.windowBarHeight)
         let screenTopAX = primaryH - min(screen.visibleFrame.maxY, screen.frame.maxY)
-        let minTopAX = screenTopAX + barH
+        let minTopAX = screenTopAX + (screen.safeAreaInsets.top >= barH ? 0 : barH)
 
         let desiredX = cursorAX.x - (baseFrame.width / 2)
         let clampedX = max(screen.frame.minX, min(desiredX, screen.frame.maxX - baseFrame.width))
@@ -201,7 +213,8 @@ public final class WindowSnapManager {
                     visibleFrameCocoa: screen.visibleFrame,
                     primaryScreenHeight: primaryH,
                     barHeight: barH,
-                    taskbarHeight: tbH
+                    taskbarHeight: tbH,
+                    safeAreaTopInset: screen.safeAreaInsets.top
                 ) {
                     AccessibilityBridge.setFrame(win.element, axFrame: normalized)
                     adjusted += 1
@@ -261,7 +274,8 @@ public final class WindowSnapManager {
             visibleFrameCocoa: screen.visibleFrame,
             primaryScreenHeight: primaryH,
             barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
         )
         let cocoaRect = WindowChromeGeometry.axRectToCocoa(axRect, primaryScreenHeight: primaryH)
         let insetRect = cocoaRect.insetBy(dx: 6, dy: 6)
@@ -416,7 +430,8 @@ public final class WindowSnapManager {
             visibleFrameCocoa: screen.visibleFrame,
             primaryScreenHeight: primaryH,
             barHeight: CGFloat(model.config.windowBarHeight),
-            taskbarHeight: CGFloat(model.config.taskbarHeight)
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
         )
         let w = (maxAX.width * 0.75).rounded()
         let h = (maxAX.height * 0.75).rounded()
@@ -432,6 +447,7 @@ public final class WindowSnapManager {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let barH = CGFloat(model.config.windowBarHeight)
         let tbH = CGFloat(model.config.taskbarHeight)
+        let safeTop = screen.safeAreaInsets.top
         return WindowSnapZone.allCases.contains { zone in
             let expected = WindowChromeGeometry.snapAXFrame(
                 for: zone,
@@ -439,7 +455,8 @@ public final class WindowSnapManager {
                 visibleFrameCocoa: screen.visibleFrame,
                 primaryScreenHeight: primaryH,
                 barHeight: barH,
-                taskbarHeight: tbH
+                taskbarHeight: tbH,
+                safeAreaTopInset: safeTop
             )
             return abs(win.axFrame.origin.x - expected.origin.x) < 12
                 && abs(win.axFrame.origin.y - expected.origin.y) < 12
