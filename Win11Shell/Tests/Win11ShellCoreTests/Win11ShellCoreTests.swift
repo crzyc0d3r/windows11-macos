@@ -307,7 +307,7 @@ struct Win11ShellCoreTests {
             screenFrameCocoa: notchedScreen,
             safeAreaTopInset: 38
         )
-        #expect(bezel == CGRect(x: 0, y: 1131, width: 1800, height: 38))
+        #expect(bezel == CGRect(x: 0, y: 1130, width: 1800, height: 39))
 
         let standardScreen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         #expect(WindowChromeGeometry.notchBezelFrameCocoa(screenFrameCocoa: standardScreen, safeAreaTopInset: 0) == nil)
@@ -388,7 +388,7 @@ struct Win11ShellCoreTests {
             taskbarHeight: 48
         )
         #expect(notchedLayout == DockedBarLayout(
-            frameCocoa: CGRect(x: 0, y: 1131, width: 1800, height: 38),
+            frameCocoa: CGRect(x: 0, y: 1130, width: 1800, height: 39),
             isNotchDocked: true,
             leftNotchWidth: 790,
             notchWidth: 220,

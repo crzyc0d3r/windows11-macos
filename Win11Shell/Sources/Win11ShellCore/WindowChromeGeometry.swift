@@ -77,11 +77,12 @@ public enum WindowChromeGeometry {
 
         let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
         if safeAreaTopInset >= barHeight && (cocoaWindow.maxY + barHeight) > (maxVisibleTop + 0.5) {
+            let bezelHeight = min(screenFrameCocoa.height, safeAreaTopInset + 1)
             let bezelRect = CGRect(
                 x: screenFrameCocoa.minX,
-                y: screenFrameCocoa.maxY - safeAreaTopInset,
+                y: screenFrameCocoa.maxY - bezelHeight,
                 width: screenFrameCocoa.width,
-                height: safeAreaTopInset
+                height: bezelHeight
             )
             let leftW = auxiliaryTopLeftWidth > 100 ? auxiliaryTopLeftWidth : (screenFrameCocoa.width - 220) / 2
             let rightW = auxiliaryTopRightWidth > 100 ? auxiliaryTopRightWidth : (screenFrameCocoa.width - 220) / 2
@@ -403,7 +404,7 @@ public enum WindowChromeGeometry {
         return .dragSurface
     }
 
-    /// Returns the Cocoa screen rect for the top notch-bezel band when `safeAreaTopInset > 1` (e.g. 38pt on notched MacBook Pro displays).
+    /// Returns the Cocoa screen rect for the top notch-bezel band when `safeAreaTopInset > 1` (e.g. 39pt on 38pt-notched MacBook Pro displays to cover MenuBarAgent).
     public static func notchBezelFrameCocoa(
         screenFrameCocoa: CGRect,
         safeAreaTopInset: CGFloat
@@ -414,11 +415,12 @@ public enum WindowChromeGeometry {
         else {
             return nil
         }
+        let bezelHeight = min(screenFrameCocoa.height, safeAreaTopInset + 1)
         return CGRect(
             x: screenFrameCocoa.minX,
-            y: screenFrameCocoa.maxY - safeAreaTopInset,
+            y: screenFrameCocoa.maxY - bezelHeight,
             width: screenFrameCocoa.width,
-            height: safeAreaTopInset
+            height: bezelHeight
         )
     }
 

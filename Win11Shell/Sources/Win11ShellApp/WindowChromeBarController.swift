@@ -13,6 +13,7 @@ public final class WindowChromeBarState {
     public var windowTitle: String = ""
     public var menuItems: [MirroredMenuItem] = []
     public var isMaximized: Bool = false
+    public var barHeight: CGFloat = 28
     public var isNotchDocked: Bool = false
     public var leftNotchWidth: CGFloat = 0
     public var notchWidth: CGFloat = 0
@@ -332,6 +333,7 @@ public final class WindowChromeBarController: NSObject {
         state.appIcon = AppIconCache.icon(forBundleID: bundleID, url: front.bundleURL, size: 16)
         state.windowTitle = effectiveWin.title.isEmpty ? state.appName : effectiveWin.title
         state.isMaximized = snapManager.isWindowMaximized(effectiveWin, on: effectiveScreen)
+        state.barHeight = layout.frameCocoa.height
         state.isNotchDocked = layout.isNotchDocked
         state.leftNotchWidth = layout.leftNotchWidth
         state.notchWidth = layout.notchWidth
@@ -352,6 +354,7 @@ public final class WindowChromeBarController: NSObject {
         }
 
         if let panel {
+            updatePanelLevel(isNotchDocked: layout.isNotchDocked)
             setPanelFrameFast(panel, to: barRect)
             if !panel.isVisible {
                 panel.orderFrontRegardless()
@@ -406,6 +409,16 @@ public final class WindowChromeBarController: NSObject {
         }
     }
 
+    private func updatePanelLevel(isNotchDocked: Bool) {
+        guard let panel else { return }
+        let targetLevel = isNotchDocked
+            ? NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
+            : NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        if panel.level != targetLevel {
+            panel.level = targetLevel
+        }
+    }
+
     @discardableResult
     private func applyOverlayFramesFast(
         forLiveBounds liveBounds: CGRect,
@@ -431,6 +444,7 @@ public final class WindowChromeBarController: NSObject {
             return nil
         }
 
+        state.barHeight = layout.frameCocoa.height
         state.isNotchDocked = layout.isNotchDocked
         state.leftNotchWidth = layout.leftNotchWidth
         state.notchWidth = layout.notchWidth
@@ -438,6 +452,7 @@ public final class WindowChromeBarController: NSObject {
         let barRect = layout.frameCocoa
 
         if let panel {
+            updatePanelLevel(isNotchDocked: layout.isNotchDocked)
             setPanelFrameFast(panel, to: barRect)
             if !panel.isVisible {
                 panel.orderFrontRegardless()
@@ -1013,7 +1028,7 @@ public final class WindowChromeBarController: NSObject {
             defer: false
         )
         p.allowsNotchAreaPlacement = true
-        p.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 3)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.backgroundColor = .clear
         p.isOpaque = false
@@ -1594,7 +1609,7 @@ private struct WindowChromeBarView: View {
     let onHoverBar: (Bool) -> Void
 
     var body: some View {
-        let barHeight: CGFloat = state.isNotchDocked ? 38 : 28
+        let barHeight = state.barHeight
         Group {
             if state.isNotchDocked {
                 HStack(spacing: 0) {

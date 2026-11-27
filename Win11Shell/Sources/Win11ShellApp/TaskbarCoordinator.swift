@@ -81,12 +81,12 @@ public final class TaskbarCoordinator {
                     defer: false
                 )
                 bezel.allowsNotchAreaPlacement = true
-                bezel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+                bezel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
                 bezel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
                 bezel.backgroundColor = .black
                 bezel.isOpaque = true
                 bezel.hasShadow = false
-                bezel.ignoresMouseEvents = true
+                bezel.ignoresMouseEvents = false
                 bezel.setFrame(bezelFrame, display: true)
                 bezel.orderFrontRegardless()
                 notchBezelPanels[displayID] = bezel
