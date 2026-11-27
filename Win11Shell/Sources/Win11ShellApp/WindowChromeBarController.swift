@@ -25,13 +25,15 @@ private struct FloatingChromeCapShape: Shape {
     let topCornerRadius: CGFloat
     let innerCornerRadius: CGFloat
     let skirtHeight: CGFloat
+    var roundTopLeft: Bool = true
+    var roundTopRight: Bool = true
 
     func path(in rect: CGRect) -> Path {
         let outer = UnevenRoundedRectangle(
-            topLeadingRadius: topCornerRadius,
+            topLeadingRadius: roundTopLeft ? topCornerRadius : 0,
             bottomLeadingRadius: 0,
             bottomTrailingRadius: 0,
-            topTrailingRadius: topCornerRadius,
+            topTrailingRadius: roundTopRight ? topCornerRadius : 0,
             style: .continuous
         ).path(in: rect)
 
@@ -42,10 +44,12 @@ private struct FloatingChromeCapShape: Shape {
             return outer
         }
 
+        let leftExtend: CGFloat = roundTopLeft ? 0 : innerCornerRadius * 2
+        let rightExtend: CGFloat = roundTopRight ? 0 : innerCornerRadius * 2
         let cutoutRect = CGRect(
-            x: rect.minX,
+            x: rect.minX - leftExtend,
             y: rect.minY + barHeight,
-            width: rect.width,
+            width: rect.width + leftExtend + rightExtend,
             height: max(rect.height - barHeight + innerCornerRadius * 2, innerCornerRadius * 3)
         )
         let cutout = RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous).path(in: cutoutRect)
@@ -79,6 +83,8 @@ public final class WindowChromeBarState {
     public var isMaximized: Bool = false
     public var barHeight: CGFloat = 28
     public var cornerSkirtHeight: CGFloat = 0
+    public var isLeftEdgeClipped: Bool = false
+    public var isRightEdgeClipped: Bool = false
     public var isNotchDocked: Bool = false
     public var leftNotchWidth: CGFloat = 0
     public var notchWidth: CGFloat = 0
@@ -424,6 +430,8 @@ public final class WindowChromeBarController: NSObject {
         state.isMaximized = snapManager.isWindowMaximized(effectiveWin, on: effectiveScreen)
         state.barHeight = barRect.height
         state.cornerSkirtHeight = effectiveSkirt
+        state.isLeftEdgeClipped = windowCocoa.minX < barRect.minX - 1.0
+        state.isRightEdgeClipped = windowCocoa.maxX > barRect.maxX + 1.0
         state.isNotchDocked = layout.isNotchDocked
         state.leftNotchWidth = layout.leftNotchWidth
         state.notchWidth = layout.notchWidth
@@ -549,6 +557,8 @@ public final class WindowChromeBarController: NSObject {
 
         state.barHeight = barRect.height
         state.cornerSkirtHeight = effectiveSkirt
+        state.isLeftEdgeClipped = windowCocoa.minX < barRect.minX - 1.0
+        state.isRightEdgeClipped = windowCocoa.maxX > barRect.maxX + 1.0
         state.isNotchDocked = layout.isNotchDocked
         state.leftNotchWidth = layout.leftNotchWidth
         state.notchWidth = layout.notchWidth
@@ -1221,7 +1231,7 @@ public final class WindowChromeBarController: NSObject {
                 )
                 dragStartMouseAX = locationAX
                 dragStartWindowFrameAX = fastFrame
-                dragWasMaximized = screen.map { snapManager.isWindowMaximized(dragTargetWindow!, on: $0) } ?? false
+                dragWasMaximized = screen.map { snapManager.shouldRestoreSizeOnDrag(dragTargetWindow!, on: $0) } ?? false
                 dragDidCrossThreshold = false
                 dragDidStartVisualGhost = false
                 dragWaitingForSnapshot = false
@@ -1555,16 +1565,8 @@ public final class WindowChromeBarController: NSObject {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let didSnap = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
-            if !didSnap, let win {
-                if wasMax {
-                    self.snapManager.clearSavedRestoreFrame(for: win, bundleID: bid ?? "")
-                    AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
-                } else {
-                    AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
-                }
-            }
 
+            // Unhide FIRST while dragGhostPanel stays on top so Chromium/macOS windows accept AX resize + move reliably.
             if let hiddenPID {
                 self.hiddenDragAppPID = nil
                 if let app = NSRunningApplication(processIdentifier: hiddenPID) {
@@ -1575,40 +1577,69 @@ public final class WindowChromeBarController: NSObject {
                 AXUIElementSetMessagingTimeout(appEl, 0.08)
                 AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
             }
+
+            let didSnap = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
+            if !didSnap, let win {
+                if wasMax {
+                    self.snapManager.clearSavedRestoreFrame(for: win, bundleID: bid ?? "")
+                    AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
+                } else {
+                    AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
+                }
+            }
+
             if let win {
                 AccessibilityBridge.focusWindow(win)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.015) {
+                let reapplyIfNeeded: () -> Void = {
                     guard !didSnap else { return }
                     let liveFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
                         ?? AccessibilityBridge.windowInfo(for: win.element, pid: win.pid)?.axFrame
-                    if let live = liveFrame,
-                       hypot(live.minX - finalAXFrame.minX, live.minY - finalAXFrame.minY) > 4
-                        || (wasMax && abs(live.width - finalAXFrame.width) > 12) {
+                    let needsMove = liveFrame.map { hypot($0.minX - finalAXFrame.minX, $0.minY - finalAXFrame.minY) > 4 } ?? true
+                    let needsResize = wasMax && (liveFrame.map {
+                        abs($0.width - finalAXFrame.width) > 12 || abs($0.height - finalAXFrame.height) > 12
+                    } ?? true)
+                    if needsMove || needsResize {
                         if wasMax {
                             AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
                         } else {
                             AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
                         }
+                        AccessibilityBridge.focusWindow(win)
                     }
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.030) { [weak self] in
+                    guard let self, self.dragGeneration == dropGeneration else { return }
+                    reapplyIfNeeded()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.070) { [weak self] in
+                    guard let self, self.dragGeneration == dropGeneration else { return }
+                    reapplyIfNeeded()
+                    self.isDraggingTargetWindow = false
+                    self.isFinishingDragDrop = false
+                    self.syncActiveWindow()
+                    self.panel?.displayIfNeeded()
+                    self.trafficLightMaskPanel?.displayIfNeeded()
+                }
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.070) { [weak self] in
+                    guard let self, self.dragGeneration == dropGeneration else { return }
+                    self.isDraggingTargetWindow = false
+                    self.isFinishingDragDrop = false
+                    self.syncActiveWindow()
+                    self.panel?.displayIfNeeded()
+                    self.trafficLightMaskPanel?.displayIfNeeded()
                 }
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
-                guard let self, self.dragGeneration == dropGeneration else { return }
-                self.isDraggingTargetWindow = false
-                self.isFinishingDragDrop = false
-                self.syncActiveWindow()
-                self.panel?.displayIfNeeded()
-                self.trafficLightMaskPanel?.displayIfNeeded()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.075) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.110) { [weak self] in
                 guard let self,
                       self.dragGeneration == dropGeneration,
                       !self.isDraggingTargetWindow
                 else { return }
                 self.dragGhostPanel?.orderOut(nil)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.155) { [weak self] in
                 guard let self, self.dragGeneration == dropGeneration else { return }
                 self.syncActiveWindow()
             }
@@ -1842,11 +1873,15 @@ private struct WindowChromeBarView: View {
         let barHeight = state.barHeight
         let skirtHeight = state.isNotchDocked ? 0 : state.cornerSkirtHeight
         let topRadius: CGFloat = (state.isNotchDocked || state.isMaximized) ? 0 : ChromeBarAppearance.floatingTopCornerRadius
+        let roundLeft = !state.isLeftEdgeClipped
+        let roundRight = !state.isRightEdgeClipped
         let capShape = FloatingChromeCapShape(
             barHeight: barHeight,
             topCornerRadius: topRadius,
             innerCornerRadius: ChromeBarAppearance.windowInnerCornerRadius,
-            skirtHeight: skirtHeight
+            skirtHeight: skirtHeight,
+            roundTopLeft: roundLeft,
+            roundTopRight: roundRight
         )
 
         VStack(spacing: 0) {
@@ -1937,10 +1972,10 @@ private struct WindowChromeBarView: View {
         .overlay {
             if !state.isNotchDocked {
                 UnevenRoundedRectangle(
-                    topLeadingRadius: topRadius,
+                    topLeadingRadius: roundLeft ? topRadius : 0,
                     bottomLeadingRadius: 0,
                     bottomTrailingRadius: 0,
-                    topTrailingRadius: topRadius,
+                    topTrailingRadius: roundRight ? topRadius : 0,
                     style: .continuous
                 )
                 .strokeBorder(ChromeBarAppearance.outerBorderColor, lineWidth: 0.75)

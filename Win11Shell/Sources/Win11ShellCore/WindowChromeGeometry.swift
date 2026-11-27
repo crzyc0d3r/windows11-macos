@@ -168,8 +168,10 @@ public enum WindowChromeGeometry {
             maxAllowedTop - barHeight
         )
 
-        let barMinX = max(screenFrameCocoa.minX, min(cocoaWindow.minX, screenFrameCocoa.maxX - 220))
-        let barWidth = min(cocoaWindow.width, screenFrameCocoa.maxX - barMinX)
+        let visibleMinX = max(screenFrameCocoa.minX, cocoaWindow.minX)
+        let visibleMaxX = min(screenFrameCocoa.maxX, cocoaWindow.maxX)
+        let barMinX = min(visibleMinX, screenFrameCocoa.maxX - 220)
+        let barWidth = max(0, visibleMaxX - barMinX)
         guard barWidth >= 220 else { return nil }
 
         return CGRect(x: barMinX, y: clampedBottom, width: barWidth, height: barHeight)

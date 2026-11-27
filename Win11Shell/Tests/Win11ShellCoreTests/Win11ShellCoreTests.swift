@@ -541,4 +541,49 @@ struct Win11ShellCoreTests {
         #expect(detachedRendered.effectiveSkirtHeight == 0)
         #expect(detachedRendered.panelFrameCocoa == detachedLayout.frameCocoa)
     }
+
+    @Test("dockedBarFrame clips cleanly to visible window edges without overhanging when off-screen")
+    func dockedBarFrameOffscreenClipping() {
+        let primaryH: CGFloat = 1169
+        let screen = CGRect(x: 0, y: 0, width: 1800, height: 1169)
+        let visible = CGRect(x: 0, y: 0, width: 1800, height: 1131)
+
+        // Window extends 130pt off the left edge (x = -130, width = 1800 -> visible right edge at 1670)
+        let leftOffscreenAX = CGRect(x: -130, y: 120, width: 1800, height: 800)
+        let leftClippedBar = WindowChromeGeometry.dockedBarFrame(
+            forAXWindowFrame: leftOffscreenAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(leftClippedBar == CGRect(x: 0, y: 1049, width: 1670, height: 28))
+        #expect(leftClippedBar?.maxX == 1670)
+
+        // Window extends past right edge (x = 1200, width = 1000 -> visible 1200..1800)
+        let rightOffscreenAX = CGRect(x: 1200, y: 120, width: 1000, height: 800)
+        let rightClippedBar = WindowChromeGeometry.dockedBarFrame(
+            forAXWindowFrame: rightOffscreenAX,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(rightClippedBar == CGRect(x: 1200, y: 1049, width: 600, height: 28))
+
+        // Mostly off-screen window with < 220pt visible hides bar
+        let mostlyOffscreenAX = CGRect(x: -1650, y: 120, width: 1800, height: 800)
+        #expect(
+            WindowChromeGeometry.dockedBarFrame(
+                forAXWindowFrame: mostlyOffscreenAX,
+                primaryScreenHeight: primaryH,
+                screenFrameCocoa: screen,
+                visibleFrameCocoa: visible,
+                barHeight: 28,
+                taskbarHeight: 48
+            ) == nil
+        )
+    }
 }

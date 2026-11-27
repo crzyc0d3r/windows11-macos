@@ -130,6 +130,22 @@ public final class WindowSnapManager {
             && abs(win.axFrame.minY - maxAX.minY) < 12
     }
 
+    public func shouldRestoreSizeOnDrag(_ win: AXWindowInfo, on screen: NSScreen) -> Bool {
+        if isWindowMaximized(win, on: screen) {
+            return true
+        }
+        let maxAX = WindowChromeGeometry.maximizedAXFrame(
+            forScreenFrameCocoa: screen.frame,
+            visibleFrameCocoa: screen.visibleFrame,
+            primaryScreenHeight: AccessibilityBridge.primaryScreenHeight(),
+            barHeight: CGFloat(model.config.windowBarHeight),
+            taskbarHeight: CGFloat(model.config.taskbarHeight),
+            safeAreaTopInset: screen.safeAreaInsets.top
+        )
+        return win.axFrame.width >= screen.frame.width - 24
+            && win.axFrame.height >= maxAX.height - 40
+    }
+
     private func shouldSaveRestoreFrame(_ win: AXWindowInfo, on screen: NSScreen) -> Bool {
         let maxAX = WindowChromeGeometry.maximizedAXFrame(
             forScreenFrameCocoa: screen.frame,
