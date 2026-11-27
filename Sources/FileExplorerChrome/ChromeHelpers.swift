@@ -25,9 +25,14 @@ struct WindowDragArea: NSViewRepresentable {
 }
 
 final class WindowDragNSView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
+    override var mouseDownCanMoveWindow: Bool {
+        !WindowConfiguratorNSView.shouldHideNativeTrafficLights
+    }
 
     override func mouseDown(with event: NSEvent) {
+        guard !WindowConfiguratorNSView.shouldHideNativeTrafficLights else {
+            return
+        }
         if event.clickCount == 2 {
             window?.zoom(nil)
         } else {
