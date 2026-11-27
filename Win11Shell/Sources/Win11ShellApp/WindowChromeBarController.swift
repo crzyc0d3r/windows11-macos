@@ -5,6 +5,97 @@ import QuartzCore
 import SwiftUI
 import Win11ShellCore
 
+private struct DragMoveRequest: @unchecked Sendable {
+    let generation: UInt64
+    let element: AXUIElement
+    let windowID: CGWindowID
+    let origin: CGPoint
+    let fallbackSize: CGSize
+}
+
+private final class AXWindowDragWorker: @unchecked Sendable {
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.hackedple.win11shell.axdrag", qos: .userInteractive)
+    private var generation: UInt64 = 0
+    private var pending: DragMoveRequest?
+    private var isDraining = false
+
+    func beginSession() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        generation &+= 1
+        pending = nil
+        return generation
+    }
+
+    func cancelSession() {
+        lock.lock()
+        defer { lock.unlock() }
+        generation &+= 1
+        pending = nil
+    }
+
+    func submit(
+        _ request: DragMoveRequest,
+        onLiveBounds: @escaping @Sendable (UInt64, CGWindowID, CGRect) -> Void
+    ) {
+        var shouldStartDrain = false
+        lock.lock()
+        if request.generation == generation {
+            pending = request
+            if !isDraining {
+                isDraining = true
+                shouldStartDrain = true
+            }
+        }
+        lock.unlock()
+
+        if shouldStartDrain {
+            queue.async { [weak self] in
+                self?.drain(onLiveBounds: onLiveBounds)
+            }
+        }
+    }
+
+    private func drain(onLiveBounds: @escaping @Sendable (UInt64, CGWindowID, CGRect) -> Void) {
+        while true {
+            lock.lock()
+            let nextReq = pending
+            pending = nil
+            let currentGen = generation
+            guard let req = nextReq, req.generation == currentGen else {
+                isDraining = false
+                lock.unlock()
+                return
+            }
+            lock.unlock()
+
+            AXUIElementSetMessagingTimeout(req.element, 0.06)
+            var pos = req.origin
+            if let posVal = AXValueCreate(.cgPoint, &pos) {
+                AXUIElementSetAttributeValue(req.element, kAXPositionAttribute as CFString, posVal)
+            }
+
+            var liveBounds = CGRect(origin: req.origin, size: req.fallbackSize)
+            if req.windowID != 0,
+               let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], req.windowID) as? [[String: Any]],
+               let first = list.first,
+               let boundsDict = first[kCGWindowBounds as String] as? [String: Any],
+               let cgRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) {
+                liveBounds = cgRect
+            }
+
+            lock.lock()
+            let stillValid = (req.generation == generation)
+            lock.unlock()
+
+            if stillValid {
+                onLiveBounds(req.generation, req.windowID, liveBounds)
+            }
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class WindowChromeBarState {
@@ -48,10 +139,8 @@ public final class WindowChromeBarController: NSObject {
     private var dragWasMaximized = false
     private var dragDidUnmaximize = false
     private var dragMinSafeAXTop: CGFloat = 28
-    private var pendingDragMouseAX: CGPoint?
-    private var dragStepScheduled = false
-    private var lastDragBackgroundSyncTime: TimeInterval = 0
-    private var dragSettleWork: DispatchWorkItem?
+    private let dragWorker = AXWindowDragWorker()
+    private var activeDragGeneration: UInt64 = 0
     private var lastAutoNormalizedFrameByWindowID: [CGWindowID: CGRect] = [:]
     private var mouseDragTap: CFMachPort?
     private var mouseDragRunLoopSource: CFRunLoopSource?
@@ -68,7 +157,7 @@ public final class WindowChromeBarController: NSObject {
             self?.attachAXObserverToFrontApp()
             self?.syncActiveWindow()
         }
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.syncActiveWindow()
             }
@@ -86,7 +175,7 @@ public final class WindowChromeBarController: NSObject {
         bar.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         bar.backgroundColor = .clear
         bar.isOpaque = false
-        bar.hasShadow = true
+        bar.hasShadow = false
 
         let hosting = NSHostingView(rootView: WindowChromeBarView(
             state: state,
@@ -148,6 +237,12 @@ public final class WindowChromeBarController: NSObject {
                 guard let self, pid != 0 else { return }
                 self.cachedMenusByPID.removeValue(forKey: pid)
                 let pidPrefix = "\(pid)-"
+                let expiredWIDs = self.sampledMaskColors.keys
+                    .filter { $0.hasPrefix(pidPrefix) }
+                    .compactMap { UInt32($0.dropFirst(pidPrefix.count)) }
+                for wid in expiredWIDs {
+                    self.cachedMaskRelativeOffsets.removeValue(forKey: wid)
+                }
                 self.sampledMaskColors = self.sampledMaskColors.filter { !$0.key.hasPrefix(pidPrefix) }
                 if self.lastMenuPID == pid {
                     self.lastMenuPID = 0
@@ -195,8 +290,11 @@ public final class WindowChromeBarController: NSObject {
     }
 
     public func syncActiveWindow() {
+        if isDraggingTargetWindow {
+            return
+        }
+
         guard model.config.showWindowChromeBar,
-              !isDraggingTargetWindow,
               let front = NSWorkspace.shared.frontmostApplication,
               let bundleID = front.bundleIdentifier,
               bundleID != "com.apple.finder",
@@ -338,12 +436,13 @@ public final class WindowChromeBarController: NSObject {
         }
     }
 
+    @discardableResult
     private func applyOverlayFramesFast(
         forLiveBounds liveBounds: CGRect,
         windowID: CGWindowID,
         primaryScreenHeight: CGFloat,
         includeBackgroundMasks: Bool
-    ) {
+    ) -> CGRect? {
         guard let screen = AccessibilityBridge.screenContaining(axFrame: liveBounds)
             ?? NSScreen.main
             ?? NSScreen.screens.first,
@@ -356,7 +455,7 @@ public final class WindowChromeBarController: NSObject {
                 taskbarHeight: CGFloat(model.config.taskbarHeight)
             )
         else {
-            return
+            return nil
         }
 
         if let panel {
@@ -376,7 +475,8 @@ public final class WindowChromeBarController: NSObject {
                 width: rel.width,
                 height: rel.height
             )
-            if axMask.intersects(barAXRect) {
+            let overlap = axMask.intersection(barAXRect)
+            if !overlap.isEmpty && overlap.height > 2 {
                 maskPanel.orderOut(nil)
             } else {
                 let cocoaMask = WindowChromeGeometry.axRectToCocoa(axMask, primaryScreenHeight: primaryScreenHeight)
@@ -388,12 +488,22 @@ public final class WindowChromeBarController: NSObject {
         }
 
         if includeBackgroundMasks {
-            lastDragBackgroundSyncTime = ProcessInfo.processInfo.systemUptime
             syncBackgroundMasks(
                 frontWindowID: windowID,
                 frontBarAXRect: barAXRect,
                 primaryScreenHeight: primaryScreenHeight
             )
+        }
+        return barAXRect
+    }
+
+    private func updateBackgroundMaskOcclusionInMemory(draggedWindowAXFrame: CGRect, draggedBarAXRect: CGRect) {
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        for (_, entry) in backgroundMasks where entry.panel.isVisible {
+            let maskAX = WindowChromeGeometry.cocoaRectToAX(entry.panel.frame, primaryScreenHeight: primaryH)
+            if maskAX.intersects(draggedWindowAXFrame) || maskAX.intersects(draggedBarAXRect) {
+                entry.panel.orderOut(nil)
+            }
         }
     }
 
@@ -402,55 +512,21 @@ public final class WindowChromeBarController: NSObject {
               let win = currentWindow,
               let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
         else {
-            syncBackgroundMasks(
-                frontWindowID: currentWindow?.windowID,
-                frontBarAXRect: nil,
-                primaryScreenHeight: AccessibilityBridge.primaryScreenHeight()
+            return
+        }
+
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        if let barAXRect = applyOverlayFramesFast(
+            forLiveBounds: liveBounds,
+            windowID: win.windowID,
+            primaryScreenHeight: primaryH,
+            includeBackgroundMasks: false
+        ) {
+            updateBackgroundMaskOcclusionInMemory(
+                draggedWindowAXFrame: liveBounds,
+                draggedBarAXRect: barAXRect
             )
-            return
         }
-
-        let primaryH = AccessibilityBridge.primaryScreenHeight()
-        let now = ProcessInfo.processInfo.systemUptime
-        let shouldSyncBg = (now - lastDragBackgroundSyncTime) >= 0.04
-        applyOverlayFramesFast(
-            forLiveBounds: liveBounds,
-            windowID: win.windowID,
-            primaryScreenHeight: primaryH,
-            includeBackgroundMasks: shouldSyncBg
-        )
-    }
-
-    private func reconcileDraggedOverlaysFromWindowServer() {
-        guard let win = dragTargetWindow ?? currentWindow,
-              let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
-        else {
-            return
-        }
-
-        let updatedWin = AXWindowInfo(
-            pid: win.pid,
-            windowID: win.windowID,
-            title: win.title,
-            axFrame: liveBounds,
-            isMinimized: win.isMinimized,
-            isFullScreen: win.isFullScreen,
-            element: win.element
-        )
-        if isDraggingTargetWindow {
-            dragTargetWindow = updatedWin
-        }
-        currentWindow = updatedWin
-
-        let primaryH = AccessibilityBridge.primaryScreenHeight()
-        let now = ProcessInfo.processInfo.systemUptime
-        let shouldSyncBg = (now - lastDragBackgroundSyncTime) >= 0.04
-        applyOverlayFramesFast(
-            forLiveBounds: liveBounds,
-            windowID: win.windowID,
-            primaryScreenHeight: primaryH,
-            includeBackgroundMasks: shouldSyncBg
-        )
     }
 
     private func syncBackgroundMasks(
@@ -582,23 +658,36 @@ public final class WindowChromeBarController: NSObject {
         primaryScreenHeight: CGFloat,
         barAXRect: CGRect
     ) {
-        guard bundleID != model.config.fileExplorerBundleID,
-              let axMaskRect = AccessibilityBridge.trafficLightUnionAXRect(for: win.element)
-        else {
+        guard bundleID != model.config.fileExplorerBundleID else {
             trafficLightMaskPanel?.orderOut(nil)
             return
         }
 
-        if win.windowID != 0 {
-            cachedMaskRelativeOffsets[win.windowID] = CGRect(
-                x: axMaskRect.minX - win.axFrame.minX,
-                y: axMaskRect.minY - win.axFrame.minY,
-                width: axMaskRect.width,
-                height: axMaskRect.height
+        let axMaskRect: CGRect
+        if win.windowID != 0, let rel = cachedMaskRelativeOffsets[win.windowID] {
+            axMaskRect = CGRect(
+                x: win.axFrame.minX + rel.minX,
+                y: win.axFrame.minY + rel.minY,
+                width: rel.width,
+                height: rel.height
             )
+        } else if let resolved = AccessibilityBridge.trafficLightUnionAXRect(for: win.element) {
+            if win.windowID != 0 {
+                cachedMaskRelativeOffsets[win.windowID] = CGRect(
+                    x: resolved.minX - win.axFrame.minX,
+                    y: resolved.minY - win.axFrame.minY,
+                    width: resolved.width,
+                    height: resolved.height
+                )
+            }
+            axMaskRect = resolved
+        } else {
+            trafficLightMaskPanel?.orderOut(nil)
+            return
         }
 
-        if axMaskRect.intersects(barAXRect) {
+        let barOverlap = axMaskRect.intersection(barAXRect)
+        if !barOverlap.isEmpty && barOverlap.height > 2 {
             trafficLightMaskPanel?.orderOut(nil)
             return
         }
@@ -771,8 +860,7 @@ public final class WindowChromeBarController: NSObject {
     }
 
     public func stopMouseDragTap() {
-        dragSettleWork?.cancel()
-        dragSettleWork = nil
+        dragWorker.cancelSession()
         fastDragSyncTimer?.invalidate()
         fastDragSyncTimer = nil
         if let tap = mouseDragTap {
@@ -786,8 +874,6 @@ public final class WindowChromeBarController: NSObject {
         isDraggingTargetWindow = false
         isExternalMouseDragging = false
         isBlockingNativeTitlebarDrag = false
-        pendingDragMouseAX = nil
-        dragStepScheduled = false
         snapManager.suppressGlobalDragMonitor = false
         hideAllBackgroundMasks()
     }
@@ -850,8 +936,6 @@ public final class WindowChromeBarController: NSObject {
 
     private func handleTapMouseDown(locationAX: CGPoint, clickCount: Int64) -> Bool {
         isBlockingNativeTitlebarDrag = false
-        dragSettleWork?.cancel()
-        dragSettleWork = nil
 
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
@@ -872,6 +956,7 @@ public final class WindowChromeBarController: NSObject {
                 let barH = CGFloat(model.config.windowBarHeight)
                 let screenTopAX = screen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
 
+                activeDragGeneration = dragWorker.beginSession()
                 dragTargetWindow = AXWindowInfo(
                     pid: win.pid,
                     windowID: win.windowID,
@@ -886,13 +971,9 @@ public final class WindowChromeBarController: NSObject {
                 dragWasMaximized = screen.map { snapManager.isWindowMaximized(dragTargetWindow!, on: $0) } ?? false
                 dragDidUnmaximize = false
                 dragMinSafeAXTop = screenTopAX + barH
-                pendingDragMouseAX = nil
-                dragStepScheduled = false
-                lastDragBackgroundSyncTime = 0
                 isDraggingTargetWindow = true
                 snapManager.suppressGlobalDragMonitor = true
                 snapPanel?.orderOut(nil)
-                startFastDragSyncTimer()
                 return true
             }
             // Menu items & caption buttons on our bar handle their own clicks without launching external drag sync.
@@ -916,7 +997,18 @@ public final class WindowChromeBarController: NSObject {
             return true
         }
 
-        // 4. Block dragging/clicking empty native OS titlebar strip & exposed traffic lights on normal windows.
+        // 4. Fast path for ordinary body clicks strictly inside focused window content (zero CGWindowList / AX IPC / timers).
+        if let win = currentWindow {
+            let f = win.axFrame
+            if locationAX.x > f.minX + 10
+                && locationAX.x < f.maxX - 10
+                && locationAX.y > f.minY + 54
+                && locationAX.y < f.maxY - 10 {
+                return false
+            }
+        }
+
+        // 5. Block dragging/clicking empty native OS titlebar strip & exposed traffic lights on normal windows.
         if model.config.showWindowChromeBar && AccessibilityBridge.hasAccessibilityPermission(prompt: false) {
             let selfPID = ProcessInfo.processInfo.processIdentifier
             if let snap = AccessibilityBridge.onScreenNormalWindows().first(where: {
@@ -961,11 +1053,19 @@ public final class WindowChromeBarController: NSObject {
             }
         }
 
-        // 5. Normal content / interactive toolbar controls / resize borders pass through.
-        if currentWindow != nil {
-            isExternalMouseDragging = true
-            lastDragBackgroundSyncTime = 0
-            startFastDragSyncTimer()
+        // 6. Start external drag sync only when resizing near focused window edges or dragging File Explorer titlebar.
+        if let win = currentWindow {
+            let f = win.axFrame
+            let nearEdge = abs(locationAX.x - f.minX) <= 10
+                || abs(locationAX.x - f.maxX) <= 10
+                || abs(locationAX.y - f.minY) <= 10
+                || abs(locationAX.y - f.maxY) <= 10
+            let inFileExplorerTitle = (currentBundleID == model.config.fileExplorerBundleID)
+                && (locationAX.y <= f.minY + 46)
+            if nearEdge || inFileExplorerTitle {
+                isExternalMouseDragging = true
+                startFastDragSyncTimer()
+            }
         }
         return false
     }
@@ -974,17 +1074,99 @@ public final class WindowChromeBarController: NSObject {
         if isBlockingNativeTitlebarDrag {
             return true
         }
-        if isDraggingTargetWindow {
-            pendingDragMouseAX = locationAX
-            if !dragStepScheduled {
-                dragStepScheduled = true
-                DispatchQueue.main.async { [weak self] in
-                    self?.performCoalescedDragStep()
+        guard isDraggingTargetWindow, let win = dragTargetWindow else {
+            return false
+        }
+
+        var dx = locationAX.x - dragStartMouseAX.x
+        var dy = locationAX.y - dragStartMouseAX.y
+
+        if dragWasMaximized && !dragDidUnmaximize && hypot(dx, dy) > 10 {
+            dragDidUnmaximize = true
+            let bid = currentBundleID.isEmpty ? (NSRunningApplication(processIdentifier: win.pid)?.bundleIdentifier ?? "") : currentBundleID
+            if let restored = snapManager.restoreFrameForDrag(window: win, bundleID: bid, cursorAX: locationAX) {
+                let updatedWin = AXWindowInfo(
+                    pid: win.pid,
+                    windowID: win.windowID,
+                    title: win.title,
+                    axFrame: restored,
+                    isMinimized: win.isMinimized,
+                    isFullScreen: win.isFullScreen,
+                    element: win.element
+                )
+                dragTargetWindow = updatedWin
+                currentWindow = updatedWin
+                dragStartWindowFrameAX = restored
+                dragStartMouseAX = locationAX
+                dx = 0
+                dy = 0
+
+                let primaryH = AccessibilityBridge.primaryScreenHeight()
+                if let barAXRect = applyOverlayFramesFast(
+                    forLiveBounds: restored,
+                    windowID: win.windowID,
+                    primaryScreenHeight: primaryH,
+                    includeBackgroundMasks: false
+                ) {
+                    updateBackgroundMaskOcclusionInMemory(
+                        draggedWindowAXFrame: restored,
+                        draggedBarAXRect: barAXRect
+                    )
                 }
             }
             return true
         }
-        return false
+
+        let targetX = (dragStartWindowFrameAX.origin.x + dx).rounded()
+        let targetY = max(dragMinSafeAXTop, dragStartWindowFrameAX.origin.y + dy).rounded()
+        let newOriginAX = CGPoint(x: targetX, y: targetY)
+
+        let req = DragMoveRequest(
+            generation: activeDragGeneration,
+            element: win.element,
+            windowID: win.windowID,
+            origin: newOriginAX,
+            fallbackSize: dragStartWindowFrameAX.size
+        )
+
+        dragWorker.submit(req) { [weak self] gen, wid, liveBounds in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.isDraggingTargetWindow,
+                      self.activeDragGeneration == gen
+                else {
+                    return
+                }
+                if let cur = self.dragTargetWindow, cur.windowID == wid {
+                    let updated = AXWindowInfo(
+                        pid: cur.pid,
+                        windowID: cur.windowID,
+                        title: cur.title,
+                        axFrame: liveBounds,
+                        isMinimized: cur.isMinimized,
+                        isFullScreen: cur.isFullScreen,
+                        element: cur.element
+                    )
+                    self.dragTargetWindow = updated
+                    self.currentWindow = updated
+                }
+
+                let primaryH = AccessibilityBridge.primaryScreenHeight()
+                if let barAXRect = self.applyOverlayFramesFast(
+                    forLiveBounds: liveBounds,
+                    windowID: wid,
+                    primaryScreenHeight: primaryH,
+                    includeBackgroundMasks: false
+                ) {
+                    self.updateBackgroundMaskOcclusionInMemory(
+                        draggedWindowAXFrame: liveBounds,
+                        draggedBarAXRect: barAXRect
+                    )
+                }
+                self.snapManager.updateDragPreview(mouseLocationCocoa: NSEvent.mouseLocation)
+            }
+        }
+        return true
     }
 
     private func handleTapMouseUp() -> Bool {
@@ -1008,9 +1190,8 @@ public final class WindowChromeBarController: NSObject {
 
         let win = dragTargetWindow ?? currentWindow
         let bid = currentBundleID.isEmpty ? nil : currentBundleID
+        dragWorker.cancelSession()
         isDraggingTargetWindow = false
-        pendingDragMouseAX = nil
-        dragStepScheduled = false
         dragTargetWindow = nil
         snapManager.suppressGlobalDragMonitor = false
 
@@ -1019,103 +1200,20 @@ public final class WindowChromeBarController: NSObject {
             _ = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
             self.syncActiveWindow()
         }
-
-        dragSettleWork?.cancel()
-        let settle = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.dragSettleWork = nil
-            if !self.isDraggingTargetWindow && !self.isExternalMouseDragging {
-                self.fastDragSyncTimer?.invalidate()
-                self.fastDragSyncTimer = nil
-            }
-            self.syncActiveWindow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.syncActiveWindow()
         }
-        dragSettleWork = settle
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: settle)
         return true
     }
 
     private func startFastDragSyncTimer() {
         fastDragSyncTimer?.invalidate()
-        fastDragSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+        fastDragSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 45.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.isDraggingTargetWindow || self.dragSettleWork != nil {
-                    self.reconcileDraggedOverlaysFromWindowServer()
-                } else if self.isExternalMouseDragging {
-                    self.syncOverlayPositionsFromWindowServer()
-                }
+                guard let self, self.isExternalMouseDragging else { return }
+                self.syncOverlayPositionsFromWindowServer()
             }
         }
-    }
-
-    private func performCoalescedDragStep() {
-        dragStepScheduled = false
-        guard isDraggingTargetWindow,
-              let locationAX = pendingDragMouseAX,
-              let win = dragTargetWindow
-        else {
-            return
-        }
-
-        var dx = locationAX.x - dragStartMouseAX.x
-        var dy = locationAX.y - dragStartMouseAX.y
-
-        if dragWasMaximized && !dragDidUnmaximize && hypot(dx, dy) > 10 {
-            let bid = currentBundleID.isEmpty ? (NSRunningApplication(processIdentifier: win.pid)?.bundleIdentifier ?? "") : currentBundleID
-            if let restored = snapManager.restoreFrameForDrag(window: win, bundleID: bid, cursorAX: locationAX) {
-                let updatedWin = AXWindowInfo(
-                    pid: win.pid,
-                    windowID: win.windowID,
-                    title: win.title,
-                    axFrame: restored,
-                    isMinimized: win.isMinimized,
-                    isFullScreen: win.isFullScreen,
-                    element: win.element
-                )
-                dragTargetWindow = updatedWin
-                currentWindow = updatedWin
-                dragStartWindowFrameAX = restored
-                dragStartMouseAX = locationAX
-                dragDidUnmaximize = true
-                dx = 0
-                dy = 0
-            }
-        }
-
-        let targetX = (dragStartWindowFrameAX.origin.x + dx).rounded()
-        let targetY = max(dragMinSafeAXTop, dragStartWindowFrameAX.origin.y + dy).rounded()
-        let newOriginAX = CGPoint(x: targetX, y: targetY)
-        AccessibilityBridge.setPosition(win.element, origin: newOriginAX, timeout: 0.08)
-
-        // Read REAL WindowServer bounds so bar & mask can NEVER detach from the actual window
-        let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
-            ?? CGRect(origin: newOriginAX, size: dragStartWindowFrameAX.size)
-        let primaryH = AccessibilityBridge.primaryScreenHeight()
-
-        let updatedWin = AXWindowInfo(
-            pid: win.pid,
-            windowID: win.windowID,
-            title: win.title,
-            axFrame: liveBounds,
-            isMinimized: win.isMinimized,
-            isFullScreen: win.isFullScreen,
-            element: win.element
-        )
-        dragTargetWindow = updatedWin
-        currentWindow = updatedWin
-
-        let now = ProcessInfo.processInfo.systemUptime
-        let shouldSyncBg = (now - lastDragBackgroundSyncTime) >= 0.04
-        applyOverlayFramesFast(
-            forLiveBounds: liveBounds,
-            windowID: win.windowID,
-            primaryScreenHeight: primaryH,
-            includeBackgroundMasks: shouldSyncBg
-        )
-
-        let cocoaMouse = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
-        snapManager.updateDragPreview(mouseLocationCocoa: cocoaMouse)
     }
 
     private func dragCurrentWindow(deltaX: CGFloat, deltaY: CGFloat) {
