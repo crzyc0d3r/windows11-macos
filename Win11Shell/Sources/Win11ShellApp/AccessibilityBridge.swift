@@ -601,7 +601,74 @@ public enum AccessibilityBridge {
         }
     }
 
-    // MARK: - Live Window Thumbnail (ScreenCaptureKit)
+    // MARK: - Live Window Thumbnail & Snapshot (ScreenCaptureKit)
+
+    private static var cachedCaptureFilters: [CGWindowID: (filter: SCContentFilter, frame: CGRect, cachedAt: TimeInterval)] = [:]
+
+    public static func invalidateCaptureFilter(for windowID: CGWindowID) {
+        cachedCaptureFilters.removeValue(forKey: windowID)
+    }
+
+    public static func captureWindowSnapshot(windowID: CGWindowID, windowAXFrame: CGRect) async -> NSImage? {
+        guard windowID != 0,
+              windowAXFrame.width >= 100,
+              windowAXFrame.height >= 100,
+              hasScreenRecordingPermission()
+        else {
+            return nil
+        }
+
+        let scale = min(2.0, NSScreen.main?.backingScaleFactor ?? 2.0)
+        let config = SCStreamConfiguration()
+        config.width = max(200, Int((windowAXFrame.width * scale).rounded()))
+        config.height = max(120, Int((windowAXFrame.height * scale).rounded()))
+        config.showsCursor = false
+        config.scalesToFit = true
+        config.captureResolution = .best
+
+        let now = ProcessInfo.processInfo.systemUptime
+        var usedCached = false
+        var filter: SCContentFilter?
+
+        if let cached = cachedCaptureFilters[windowID],
+           abs(cached.frame.width - windowAXFrame.width) < 2,
+           abs(cached.frame.height - windowAXFrame.height) < 2,
+           (now - cached.cachedAt) < 15.0 {
+            filter = cached.filter
+            usedCached = true
+        }
+
+        do {
+            if filter == nil {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let scWindow = content.windows.first(where: { $0.windowID == windowID }) else {
+                    return nil
+                }
+                let created = SCContentFilter(desktopIndependentWindow: scWindow)
+                cachedCaptureFilters[windowID] = (created, windowAXFrame, ProcessInfo.processInfo.systemUptime)
+                filter = created
+            }
+
+            guard let activeFilter = filter else { return nil }
+            do {
+                let cgImage = try await SCScreenshotManager.captureImage(contentFilter: activeFilter, configuration: config)
+                return NSImage(cgImage: cgImage, size: windowAXFrame.size)
+            } catch {
+                guard usedCached else { return nil }
+                cachedCaptureFilters.removeValue(forKey: windowID)
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let scWindow = content.windows.first(where: { $0.windowID == windowID }) else {
+                    return nil
+                }
+                let freshFilter = SCContentFilter(desktopIndependentWindow: scWindow)
+                cachedCaptureFilters[windowID] = (freshFilter, windowAXFrame, ProcessInfo.processInfo.systemUptime)
+                let cgImage = try await SCScreenshotManager.captureImage(contentFilter: freshFilter, configuration: config)
+                return NSImage(cgImage: cgImage, size: windowAXFrame.size)
+            }
+        } catch {
+            return nil
+        }
+    }
 
     public static func captureWindowThumbnail(windowID: CGWindowID) async -> NSImage? {
         guard windowID != 0, hasScreenRecordingPermission() else {

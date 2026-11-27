@@ -26,7 +26,12 @@ public final class WindowChromeBarState {
 private final class DragGhostState {
     var appIcon: NSImage?
     var title: String = ""
+    var menuTitles: [String] = []
     var barHeight: CGFloat = 28
+    var snapshot: NSImage?
+    var snapshotOriginalSize: CGSize = .zero
+    var trafficLightMaskRectLocal: CGRect?
+    var trafficLightMaskColor: NSColor?
 }
 
 @MainActor
@@ -46,6 +51,10 @@ public final class WindowChromeBarController: NSObject {
     private weak var leftNotchDragZoneNSView: NSView?
     private var sampledMaskColors: [String: NSColor] = [:]
     private var pendingMaskColorKeys: Set<String> = []
+    private var cachedDragSnapshot: (windowID: CGWindowID, image: NSImage, size: CGSize, capturedAt: TimeInterval)?
+    private var snapshotCaptureInFlightWID: CGWindowID?
+    private var hiddenDragAppPID: pid_t?
+    private var isFinishingDragDrop = false
     private var syncTimer: Timer?
     private var fastDragSyncTimer: Timer?
     private var axObserver: AXObserver?
@@ -84,7 +93,16 @@ public final class WindowChromeBarController: NSObject {
         }
         syncTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.syncActiveWindow()
+                guard let self else { return }
+                if self.hiddenDragAppPID != nil && !self.isFinishingDragDrop && (NSEvent.pressedMouseButtons & 1) == 0 {
+                    self.dragGhostPanel?.orderOut(nil)
+                    self.isDraggingTargetWindow = false
+                    self.dragDidStartVisualGhost = false
+                    self.dragTargetWindow = nil
+                    self.snapManager.suppressGlobalDragMonitor = false
+                    self.restoreHiddenDragAppIfNeeded()
+                }
+                self.syncActiveWindow()
             }
         }
     }
@@ -137,6 +155,11 @@ public final class WindowChromeBarController: NSObject {
             },
             onHoverMaximize: { [weak self] hovering, anchorRect in
                 self?.handleMaximizeHover(hovering: hovering, anchorRect: anchorRect)
+            },
+            onHoverBar: { [weak self] hovering in
+                if hovering {
+                    self?.prewarmSnapshotForCurrentWindow(force: false)
+                }
             }
         ))
         bar.contentView = hosting
@@ -171,6 +194,13 @@ public final class WindowChromeBarController: NSObject {
                     .compactMap { UInt32($0.dropFirst(pidPrefix.count)) }
                 for wid in expiredWIDs {
                     self.cachedMaskRelativeOffsets.removeValue(forKey: wid)
+                    AccessibilityBridge.invalidateCaptureFilter(for: wid)
+                    if self.cachedDragSnapshot?.windowID == wid {
+                        self.cachedDragSnapshot = nil
+                    }
+                }
+                if self.hiddenDragAppPID == pid {
+                    self.hiddenDragAppPID = nil
                 }
                 self.sampledMaskColors = self.sampledMaskColors.filter { !$0.key.hasPrefix(pidPrefix) }
                 if self.lastMenuPID == pid {
@@ -219,7 +249,7 @@ public final class WindowChromeBarController: NSObject {
     }
 
     public func syncActiveWindow() {
-        if isDraggingTargetWindow {
+        if isDraggingTargetWindow || isFinishingDragDrop {
             return
         }
 
@@ -810,6 +840,7 @@ public final class WindowChromeBarController: NSObject {
 
     public func stopMouseDragTap() {
         dragGhostPanel?.orderOut(nil)
+        restoreHiddenDragAppIfNeeded()
         fastDragSyncTimer?.invalidate()
         fastDragSyncTimer = nil
         if let tap = mouseDragTap {
@@ -823,9 +854,86 @@ public final class WindowChromeBarController: NSObject {
         isDraggingTargetWindow = false
         isExternalMouseDragging = false
         isBlockingNativeTitlebarDrag = false
+        isFinishingDragDrop = false
         dragDidStartVisualGhost = false
         snapManager.suppressGlobalDragMonitor = false
         hideAllBackgroundMasks()
+    }
+
+    private func prewarmSnapshotForCurrentWindow(force: Bool, maxAge: TimeInterval = 0.6) {
+        guard !isFinishingDragDrop,
+              let win = isDraggingTargetWindow ? dragTargetWindow : currentWindow,
+              win.windowID != 0
+        else {
+            return
+        }
+
+        let wid = win.windowID
+        let frame = AccessibilityBridge.liveWindowBounds(windowID: wid) ?? win.axFrame
+        let now = ProcessInfo.processInfo.systemUptime
+
+        if !force,
+           let cached = cachedDragSnapshot,
+           cached.windowID == wid,
+           abs(cached.size.width - frame.width) < 4,
+           abs(cached.size.height - frame.height) < 4,
+           (now - cached.capturedAt) < maxAge {
+            return
+        }
+
+        if snapshotCaptureInFlightWID == wid {
+            return
+        }
+        snapshotCaptureInFlightWID = wid
+
+        let pid = win.pid
+        Task { @MainActor [weak self] in
+            let image = await AccessibilityBridge.captureWindowSnapshot(windowID: wid, windowAXFrame: frame)
+            guard let self else { return }
+            if self.snapshotCaptureInFlightWID == wid {
+                self.snapshotCaptureInFlightWID = nil
+            }
+            guard let image else { return }
+            self.cachedDragSnapshot = (wid, image, frame.size, ProcessInfo.processInfo.systemUptime)
+
+            if self.isDraggingTargetWindow && self.dragTargetWindow?.windowID == wid {
+                self.dragGhostState.snapshot = image
+                self.dragGhostState.snapshotOriginalSize = frame.size
+                if self.dragDidStartVisualGhost && self.hiddenDragAppPID == nil {
+                    self.hideRealWindowForActiveDrag(pid: pid, windowID: wid)
+                }
+            }
+        }
+    }
+
+    private func hideRealWindowForActiveDrag(pid: pid_t, windowID: CGWindowID) {
+        guard hiddenDragAppPID == nil,
+              pid != ProcessInfo.processInfo.processIdentifier
+        else {
+            return
+        }
+
+        panel?.orderOut(nil)
+        trafficLightMaskPanel?.orderOut(nil)
+        if let targetApp = NSRunningApplication(processIdentifier: pid) {
+            targetApp.hide()
+            hiddenDragAppPID = pid
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            guard let self, self.isDraggingTargetWindow else { return }
+            self.syncBackgroundMasks(
+                frontWindowID: windowID,
+                frontBarAXRect: nil,
+                primaryScreenHeight: AccessibilityBridge.primaryScreenHeight()
+            )
+        }
+    }
+
+    private func restoreHiddenDragAppIfNeeded() {
+        guard let pid = hiddenDragAppPID else { return }
+        hiddenDragAppPID = nil
+        NSRunningApplication(processIdentifier: pid)?.unhide()
     }
 
     nonisolated private func handleMouseTapCallback(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -972,6 +1080,7 @@ public final class WindowChromeBarController: NSObject {
                 isDraggingTargetWindow = true
                 snapManager.suppressGlobalDragMonitor = true
                 snapPanel?.orderOut(nil)
+                prewarmSnapshotForCurrentWindow(force: false, maxAge: 0.25)
                 return true
             }
             // Menu items & caption buttons on our bar handle their own clicks without launching external drag sync.
@@ -1105,10 +1214,32 @@ public final class WindowChromeBarController: NSObject {
                 }
             }
 
-            panel?.orderOut(nil)
             dragGhostState.appIcon = state.appIcon
             dragGhostState.title = state.windowTitle
+            dragGhostState.menuTitles = Array(state.menuItems.prefix(6).map(\.title))
             dragGhostState.barHeight = barH
+
+            if let cached = cachedDragSnapshot,
+               cached.windowID == win.windowID,
+               abs(cached.size.width - dragStartWindowFrameAX.width) < 4,
+               abs(cached.size.height - dragStartWindowFrameAX.height) < 4 {
+                dragGhostState.snapshot = cached.image
+                dragGhostState.snapshotOriginalSize = cached.size
+            } else {
+                dragGhostState.snapshot = nil
+                dragGhostState.snapshotOriginalSize = dragStartWindowFrameAX.size
+                prewarmSnapshotForCurrentWindow(force: true)
+            }
+
+            if currentBundleID != model.config.fileExplorerBundleID {
+                dragGhostState.trafficLightMaskRectLocal = cachedMaskRelativeOffsets[win.windowID]
+                    ?? CGRect(x: 10, y: 8, width: 62, height: 22)
+                dragGhostState.trafficLightMaskColor = sampledMaskColors["\(win.pid)-\(win.windowID)"]
+                    ?? defaultMaskFallbackColor()
+            } else {
+                dragGhostState.trafficLightMaskRectLocal = nil
+                dragGhostState.trafficLightMaskColor = nil
+            }
 
             let targetWinX = (locationAX.x - dragGhostGrabOffsetAX.x).rounded()
             let targetWinY = max(dragMinSafeAXTop, (locationAX.y - dragGhostGrabOffsetAX.y).rounded())
@@ -1125,6 +1256,12 @@ public final class WindowChromeBarController: NSObject {
             let ghostPanel = ensureDragGhostPanel()
             ghostPanel.setFrame(ghostCocoaRect, display: true)
             ghostPanel.orderFrontRegardless()
+
+            panel?.orderOut(nil)
+            trafficLightMaskPanel?.orderOut(nil)
+            if dragGhostState.snapshot != nil {
+                hideRealWindowForActiveDrag(pid: win.pid, windowID: win.windowID)
+            }
         }
 
         let targetWinX = (locationAX.x - dragGhostGrabOffsetAX.x).rounded()
@@ -1172,17 +1309,29 @@ public final class WindowChromeBarController: NSObject {
         let didMove = dragDidStartVisualGhost
         let wasMax = dragWasMaximized
         let finalAXFrame = CGRect(origin: dragGhostCurrentWindowOriginAX, size: dragGhostWindowSizeAX)
+        let hiddenPID = hiddenDragAppPID
 
-        dragGhostPanel?.orderOut(nil)
-        isDraggingTargetWindow = false
         dragDidStartVisualGhost = false
         dragTargetWindow = nil
         snapManager.suppressGlobalDragMonitor = false
 
+        if !didMove {
+            dragGhostPanel?.orderOut(nil)
+            isDraggingTargetWindow = false
+            restoreHiddenDragAppIfNeeded()
+            DispatchQueue.main.async { [weak self] in
+                self?.syncActiveWindow()
+            }
+            return true
+        }
+
+        cachedDragSnapshot = nil
+        isFinishingDragDrop = true
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let didSnap = self.snapManager.commitDragSnapIfActive(window: win, bundleID: bid)
-            if !didSnap && didMove, let win {
+            if !didSnap, let win {
                 if wasMax {
                     self.snapManager.clearSavedRestoreFrame(for: win, bundleID: bid ?? "")
                     AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
@@ -1190,10 +1339,38 @@ public final class WindowChromeBarController: NSObject {
                     AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
                 }
             }
-            self.syncActiveWindow()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
-            self?.syncActiveWindow()
+
+            if let hiddenPID {
+                self.hiddenDragAppPID = nil
+                if let app = NSRunningApplication(processIdentifier: hiddenPID) {
+                    app.unhide()
+                    app.activate(options: [.activateAllWindows])
+                }
+            }
+            if let win {
+                AccessibilityBridge.focusWindow(win)
+                if !didSnap,
+                   let live = AccessibilityBridge.liveWindowBounds(windowID: win.windowID),
+                   hypot(live.minX - finalAXFrame.minX, live.minY - finalAXFrame.minY) > 4
+                    || (wasMax && abs(live.width - finalAXFrame.width) > 12) {
+                    if wasMax {
+                        AccessibilityBridge.setFrame(win.element, axFrame: finalAXFrame)
+                    } else {
+                        AccessibilityBridge.setPosition(win.element, origin: finalAXFrame.origin)
+                    }
+                }
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.045) { [weak self] in
+                guard let self else { return }
+                self.isDraggingTargetWindow = false
+                self.isFinishingDragDrop = false
+                self.syncActiveWindow()
+                self.dragGhostPanel?.orderOut(nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) { [weak self] in
+                self?.syncActiveWindow()
+            }
         }
         return true
     }
@@ -1414,6 +1591,7 @@ private struct WindowChromeBarView: View {
     let onMaximize: () -> Void
     let onClose: () -> Void
     let onHoverMaximize: (Bool, NSRect) -> Void
+    let onHoverBar: (Bool) -> Void
 
     var body: some View {
         let barHeight: CGFloat = state.isNotchDocked ? 38 : 28
@@ -1471,6 +1649,7 @@ private struct WindowChromeBarView: View {
             }
         }
         .frame(height: barHeight)
+        .onHover(perform: onHoverBar)
         .background(
             Group {
                 if state.isNotchDocked {
@@ -1546,21 +1725,31 @@ private struct DragGhostPreviewView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 if let icon = state.appIcon {
                     Image(nsImage: icon)
                         .resizable()
                         .frame(width: 15, height: 15)
-                        .padding(.leading, 10)
+                        .padding(.leading, 8)
                 }
 
+                ForEach(Array(state.menuTitles.enumerated()), id: \.offset) { _, menuTitle in
+                    Text(menuTitle)
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.86))
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                }
+
+                Spacer(minLength: 8)
+
                 Text(state.title)
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.88))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.75))
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                Spacer()
+                Spacer(minLength: 8)
 
                 HStack(spacing: 0) {
                     ghostCaptionGlyph("minus")
@@ -1569,7 +1758,7 @@ private struct DragGhostPreviewView: View {
                 }
             }
             .frame(height: state.barHeight)
-            .background(Color(red: 0.10, green: 0.10, blue: 0.12).opacity(0.94))
+            .background(Color(red: 0.11, green: 0.11, blue: 0.13).opacity(0.96))
             .overlay(
                 Rectangle()
                     .frame(height: 0.5)
@@ -1577,34 +1766,63 @@ private struct DragGhostPreviewView: View {
                 alignment: .bottom
             )
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.black.opacity(0.24))
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.08))
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.35), lineWidth: 1.5)
+            Group {
+                if let snapshot = state.snapshot {
+                    GeometryReader { geo in
+                        let origW = max(1, state.snapshotOriginalSize.width)
+                        let origH = max(1, state.snapshotOriginalSize.height)
+                        let sx = geo.size.width / origW
+                        let sy = geo.size.height / origH
+                        ZStack(alignment: .topLeading) {
+                            Image(nsImage: snapshot)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: geo.size.width, height: geo.size.height)
 
-                HStack(spacing: 8) {
-                    if let icon = state.appIcon {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .frame(width: 18, height: 18)
+                            if let relMask = state.trafficLightMaskRectLocal,
+                               let maskColor = state.trafficLightMaskColor {
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(Color(nsColor: maskColor))
+                                    .frame(
+                                        width: max(1, relMask.width * sx),
+                                        height: max(1, relMask.height * sy)
+                                    )
+                                    .offset(
+                                        x: relMask.minX * sx,
+                                        y: relMask.minY * sy
+                                    )
+                            }
+                        }
                     }
-                    Text(state.title)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.92))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.black.opacity(0.24))
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.35), lineWidth: 1.5)
+
+                        HStack(spacing: 8) {
+                            if let icon = state.appIcon {
+                                Image(nsImage: icon)
+                                    .resizable()
+                                    .frame(width: 18, height: 18)
+                            }
+                            Text(state.title)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.92))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.black.opacity(0.45))
+                        )
+                    }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color.black.opacity(0.45))
-                )
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -1612,6 +1830,7 @@ private struct DragGhostPreviewView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(0.45), radius: 18, x: 0, y: 10)
     }
 
     private func ghostCaptionGlyph(_ symbol: String) -> some View {
