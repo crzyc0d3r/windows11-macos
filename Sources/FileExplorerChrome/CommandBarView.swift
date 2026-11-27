@@ -15,13 +15,19 @@ struct CommandBarView: View {
         HStack(spacing: 4) {
             if store.activeTab.location == .recycleBin {
                 recycleBinActions
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
             } else {
                 standardActions
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
             }
 
             Spacer(minLength: 8)
 
             rightPanePills
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
         }
         .padding(.horizontal, 12)
         .frame(height: barHeight)
@@ -165,6 +171,8 @@ struct CommandBarView: View {
                 Text("New")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(isEnabled ? theme.palette.textPrimary : theme.palette.textSecondary.opacity(0.4))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(isEnabled ? theme.palette.textSecondary : theme.palette.textSecondary.opacity(0.4))
@@ -187,6 +195,8 @@ struct CommandBarView: View {
                     .font(.system(size: 12, weight: .medium))
                 Text("Sort")
                     .font(.system(size: 12.5, weight: .regular))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(theme.palette.textSecondary)
@@ -210,6 +220,8 @@ struct CommandBarView: View {
                     .font(.system(size: 12, weight: .medium))
                 Text("View")
                     .font(.system(size: 12.5, weight: .regular))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(theme.palette.textSecondary)
@@ -533,6 +545,7 @@ private struct CommandBarPopupButton<Label: View>: View {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchorView.bounds.height + 4), in: anchorView)
         } label: {
             label()
+                .fixedSize(horizontal: true, vertical: false)
                 .background(
                     RoundedRectangle(cornerRadius: theme.cornerRadiusSmall, style: .continuous)
                         .fill(isEnabled && isHovered ? theme.palette.hoverFill : .clear)
@@ -586,7 +599,10 @@ private struct CommandBarTextButton: View {
                     .font(.system(size: 12.5, weight: .medium))
                 Text(title)
                     .font(.system(size: 12.5, weight: .regular))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(isEnabled ? theme.palette.textPrimary : theme.palette.textSecondary.opacity(0.4))
             .padding(.horizontal, 10)
             .frame(height: 32)
@@ -619,7 +635,10 @@ private struct PaneTogglePillButton: View {
                     .font(.system(size: 12, weight: .medium))
                 Text(title)
                     .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(isActive ? theme.palette.accentBlue : theme.palette.textPrimary)
             .padding(.horizontal, 10)
             .frame(height: 30)

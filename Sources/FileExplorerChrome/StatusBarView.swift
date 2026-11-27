@@ -18,8 +18,10 @@ public struct StatusBarView: View {
     public var body: some View {
         HStack(spacing: 10) {
             leftSummary
+                .layoutPriority(1)
             Spacer(minLength: 8)
             rightQuickViewToggles
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 12)
         .frame(height: barHeight)
@@ -38,6 +40,8 @@ public struct StatusBarView: View {
             Text(itemCountText)
                 .font(.system(size: 11.5))
                 .foregroundStyle(theme.palette.textSecondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
 
             if !store.selectedItems.isEmpty {
                 separator
@@ -45,6 +49,8 @@ public struct StatusBarView: View {
                 Text(selectionSummaryText)
                     .font(.system(size: 11.5))
                     .foregroundStyle(theme.palette.textPrimary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             if let activeOp = store.activeOperations.first {
