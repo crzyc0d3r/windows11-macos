@@ -125,7 +125,7 @@ public enum AccessibilityBridge {
             }
         }
 
-        guard let frame = rectAttribute(element) else {
+        guard let axRect = rectAttribute(element) else {
             return nil
         }
 
@@ -136,11 +136,22 @@ public enum AccessibilityBridge {
         let isMinimized = boolAttribute(element, kAXMinimizedAttribute) ?? false
         let isFullScreen = boolAttribute(element, "AXFullScreen") ?? false
 
+        let effectiveFrame: CGRect
+        if !isMinimized,
+           wid != 0,
+           let live = liveWindowBounds(windowID: wid),
+           live.width >= 50,
+           live.height >= 50 {
+            effectiveFrame = live
+        } else {
+            effectiveFrame = axRect
+        }
+
         return AXWindowInfo(
             pid: pid,
             windowID: wid,
             title: title,
-            axFrame: frame,
+            axFrame: effectiveFrame,
             isMinimized: isMinimized,
             isFullScreen: isFullScreen,
             element: element
@@ -529,6 +540,25 @@ public enum AccessibilityBridge {
         }
 
         return unionRect.insetBy(dx: -4, dy: -3)
+    }
+
+    /// Computes and validates the traffic-light mask rect in the window element's own AX coordinate space.
+    public static func trafficLightRelativeRect(for windowElement: AXUIElement) -> CGRect? {
+        guard let winAX = rectAttribute(windowElement),
+              let unionAX = trafficLightUnionAXRect(for: windowElement)
+        else {
+            return nil
+        }
+        let rel = CGRect(
+            x: unionAX.minX - winAX.minX,
+            y: unionAX.minY - winAX.minY,
+            width: unionAX.width,
+            height: unionAX.height
+        )
+        guard WindowChromeGeometry.isValidTrafficLightRelativeRect(rel, forWindowSize: winAX.size) else {
+            return nil
+        }
+        return rel
     }
 
     public static func sampleTitlebarColor(

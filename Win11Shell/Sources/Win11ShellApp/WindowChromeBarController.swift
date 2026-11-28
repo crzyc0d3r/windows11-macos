@@ -303,6 +303,7 @@ public final class WindowChromeBarState {
     public var windowTitle: String = ""
     public var menuItems: [MirroredMenuItem] = []
     public var isMaximized: Bool = false
+    public var barWidth: CGFloat = 600
     public var barHeight: CGFloat = 28
     public var cornerSkirtHeight: CGFloat = 0
     public var isLeftEdgeClipped: Bool = false
@@ -448,7 +449,7 @@ public final class WindowChromeBarController: NSObject {
         let startOrigin: CGPoint
     }
 
-    private var lastAutoNormalizedFrameByWindowID: [CGWindowID: CGRect] = [:]
+    private var autoNormalizeAttemptsByWindowID: [CGWindowID: (frame: CGRect, count: Int)] = [:]
     private var nativeDragGuard: NativeDragGuard?
     private var mouseDragTap: CFMachPort?
     private var mouseDragRunLoopSource: CFRunLoopSource?
@@ -469,7 +470,7 @@ public final class WindowChromeBarController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let physicalLeftDown = CGEventSource.buttonState(.hidSystemState, button: .left)
-                if self.hiddenDragAppPID != nil && !self.isFinishingDragDrop && !physicalLeftDown {
+                if (self.isDraggingTargetWindow || self.hiddenDragAppPID != nil) && !self.isFinishingDragDrop && !physicalLeftDown {
                     self.dragGhostPanel?.orderOut(nil)
                     self.isDraggingTargetWindow = false
                     self.dragDidStartVisualGhost = false
@@ -508,6 +509,7 @@ public final class WindowChromeBarController: NSObject {
         bar.backgroundColor = .clear
         bar.isOpaque = false
         bar.hasShadow = false
+        bar.minSize = .zero
 
         let hosting = ChromeBarHostingView(rootView: WindowChromeBarView(
             state: state,
@@ -550,6 +552,7 @@ public final class WindowChromeBarController: NSObject {
                 }
             }
         ))
+        hosting.sizingOptions = []
         barHostingView = hosting
         bar.contentView = hosting
         panel = bar
@@ -568,7 +571,10 @@ public final class WindowChromeBarController: NSObject {
         skirt.isOpaque = false
         skirt.hasShadow = false
         skirt.ignoresMouseEvents = true
-        skirt.contentView = NSHostingView(rootView: CornerSkirtOverlayView(state: cornerSkirtState))
+        skirt.minSize = .zero
+        let skirtHosting = NSHostingView(rootView: CornerSkirtOverlayView(state: cornerSkirtState))
+        skirtHosting.sizingOptions = []
+        skirt.contentView = skirtHosting
         cornerSkirtPanel = skirt
     }
 
@@ -658,6 +664,8 @@ public final class WindowChromeBarController: NSObject {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         let notifications = [
             kAXFocusedWindowChangedNotification,
+            kAXMainWindowChangedNotification,
+            kAXWindowCreatedNotification,
             kAXWindowMovedNotification,
             kAXWindowResizedNotification,
             kAXTitleChangedNotification,
@@ -706,7 +714,9 @@ public final class WindowChromeBarController: NSObject {
                 taskbarHeight: CGFloat(model.config.taskbarHeight),
                 safeAreaTopInset: screen.safeAreaInsets.top
             ) {
-                if lastAutoNormalizedFrameByWindowID[win.windowID] != win.axFrame,
+                let prev = autoNormalizeAttemptsByWindowID[win.windowID]
+                let alreadyExhausted = win.windowID != 0 && prev?.frame == win.axFrame && (prev?.count ?? 0) >= 3
+                if !alreadyExhausted,
                    let normalized = WindowChromeGeometry.normalizedAXFrame(
                     forAXWindowFrame: win.axFrame,
                     screenFrameCocoa: screen.frame,
@@ -716,9 +726,20 @@ public final class WindowChromeBarController: NSObject {
                     taskbarHeight: CGFloat(model.config.taskbarHeight),
                     safeAreaTopInset: screen.safeAreaInsets.top
                    ) {
-                    lastAutoNormalizedFrameByWindowID[win.windowID] = win.axFrame
+                    if win.windowID != 0 {
+                        let nextCount = (prev?.frame == win.axFrame) ? ((prev?.count ?? 0) + 1) : 1
+                        autoNormalizeAttemptsByWindowID[win.windowID] = (win.axFrame, nextCount)
+                    }
                     AccessibilityBridge.setFrame(win.element, axFrame: normalized)
                     let liveAX = AccessibilityBridge.liveWindowBounds(windowID: win.windowID) ?? normalized
+                    if abs(liveAX.minX - normalized.minX) > 2
+                        || abs(liveAX.minY - normalized.minY) > 2
+                        || abs(liveAX.width - normalized.width) > 2
+                        || abs(liveAX.height - normalized.height) > 2 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+                            self?.syncActiveWindow()
+                        }
+                    }
                     effectiveWin = AXWindowInfo(
                         pid: win.pid,
                         windowID: win.windowID,
@@ -731,7 +752,7 @@ public final class WindowChromeBarController: NSObject {
                     effectiveScreen = AccessibilityBridge.screenContaining(axFrame: liveAX) ?? screen
                 }
             } else {
-                lastAutoNormalizedFrameByWindowID.removeValue(forKey: win.windowID)
+                autoNormalizeAttemptsByWindowID.removeValue(forKey: win.windowID)
             }
         }
 
@@ -788,6 +809,7 @@ public final class WindowChromeBarController: NSObject {
         state.appIcon = AppIconCache.icon(forBundleID: bundleID, url: front.bundleURL, size: 16)
         state.windowTitle = effectiveWin.title.isEmpty ? state.appName : effectiveWin.title
         state.isMaximized = isMaximized
+        state.barWidth = barRect.width
         state.barHeight = barRect.height
         state.cornerSkirtHeight = effectiveSkirt
         state.isLeftEdgeClipped = leftClipped
@@ -990,6 +1012,7 @@ public final class WindowChromeBarController: NSObject {
         logicalBarFrameCocoa = barRect
 
         state.isMaximized = isMaximized
+        state.barWidth = barRect.width
         state.barHeight = barRect.height
         state.cornerSkirtHeight = effectiveSkirt
         state.isLeftEdgeClipped = leftClipped
@@ -1233,6 +1256,7 @@ public final class WindowChromeBarController: NSObject {
                     } else {
                         let barState = BackgroundChromeBarState()
                         let hosting = OccludedBarHostingView(rootView: BackgroundChromeBarView(state: barState))
+                        hosting.sizingOptions = []
                         let p = NonActivatingFloatingPanel(
                             contentRect: bgBarRectCocoa,
                             styleMask: [.borderless, .nonactivatingPanel],
@@ -1247,6 +1271,7 @@ public final class WindowChromeBarController: NSObject {
                         p.isOpaque = false
                         p.hasShadow = false
                         p.ignoresMouseEvents = true
+                        p.minSize = .zero
                         p.contentView = hosting
 
                         entry = BackgroundBarEntry(
@@ -1393,13 +1418,7 @@ public final class WindowChromeBarController: NSObject {
             foundIDs.insert(axWin.windowID)
             var rel: CGRect? = cachedMaskRelativeOffsets[axWin.windowID]
             if includeTrafficLight && rel == nil && !noTrafficLightWindowIDs.contains(axWin.windowID) {
-                if let unionAX = AccessibilityBridge.trafficLightUnionAXRect(for: axWin.element) {
-                    let computed = CGRect(
-                        x: unionAX.minX - axWin.axFrame.minX,
-                        y: unionAX.minY - axWin.axFrame.minY,
-                        width: unionAX.width,
-                        height: unionAX.height
-                    )
+                if let computed = AccessibilityBridge.trafficLightRelativeRect(for: axWin.element) {
                     cachedMaskRelativeOffsets[axWin.windowID] = computed
                     rel = computed
                 } else {
@@ -1440,13 +1459,7 @@ public final class WindowChromeBarController: NSObject {
         }
         let standardWins = AccessibilityBridge.standardWindows(for: snap.pid)
         if let axWin = standardWins.first(where: { $0.windowID == snap.windowID }) {
-            if let unionAX = AccessibilityBridge.trafficLightUnionAXRect(for: axWin.element) {
-                let rel = CGRect(
-                    x: unionAX.minX - axWin.axFrame.minX,
-                    y: unionAX.minY - axWin.axFrame.minY,
-                    width: unionAX.width,
-                    height: unionAX.height
-                )
+            if let rel = AccessibilityBridge.trafficLightRelativeRect(for: axWin.element) {
                 cachedMaskRelativeOffsets[snap.windowID] = rel
                 return rel
             }
@@ -1478,16 +1491,16 @@ public final class WindowChromeBarController: NSObject {
                 width: rel.width,
                 height: rel.height
             )
-        } else if let resolved = AccessibilityBridge.trafficLightUnionAXRect(for: win.element) {
+        } else if let rel = AccessibilityBridge.trafficLightRelativeRect(for: win.element) {
             if win.windowID != 0 {
-                cachedMaskRelativeOffsets[win.windowID] = CGRect(
-                    x: resolved.minX - win.axFrame.minX,
-                    y: resolved.minY - win.axFrame.minY,
-                    width: resolved.width,
-                    height: resolved.height
-                )
+                cachedMaskRelativeOffsets[win.windowID] = rel
             }
-            axMaskRect = resolved
+            axMaskRect = CGRect(
+                x: win.axFrame.minX + rel.minX,
+                y: win.axFrame.minY + rel.minY,
+                width: rel.width,
+                height: rel.height
+            )
         } else {
             trafficLightMaskPanel?.orderOut(nil)
             return
@@ -1886,7 +1899,10 @@ public final class WindowChromeBarController: NSObject {
         p.isOpaque = false
         p.hasShadow = false
         p.ignoresMouseEvents = true
-        p.contentView = NSHostingView(rootView: DragGhostPreviewView(state: dragGhostState))
+        p.minSize = .zero
+        let ghostHosting = NSHostingView(rootView: DragGhostPreviewView(state: dragGhostState))
+        ghostHosting.sizingOptions = []
+        p.contentView = ghostHosting
         dragGhostPanel = p
         return p
     }
@@ -2362,8 +2378,13 @@ public final class WindowChromeBarController: NSObject {
 
                 dragGhostState.appIcon = state.appIcon
                 dragGhostState.title = state.windowTitle
-                dragGhostState.menuTitles = Array(state.menuItems.prefix(7).map(\.title))
-                dragGhostState.hasOverflowMenus = state.menuItems.count > 7
+                let ghostVisibleMenus = WindowChromeGeometry.visibleMenuCount(
+                    forMenuTitles: state.menuItems.map(\.title),
+                    barWidth: dragGhostWindowSizeAX.width,
+                    maxVisibleMenus: 7
+                )
+                dragGhostState.menuTitles = Array(state.menuItems.prefix(ghostVisibleMenus).map(\.title))
+                dragGhostState.hasOverflowMenus = state.menuItems.count > ghostVisibleMenus
                 dragGhostState.barHeight = barH
 
                 if currentBundleID != model.config.fileExplorerBundleID {
@@ -2651,35 +2672,42 @@ public final class WindowChromeBarController: NSObject {
     }
 
     private func dragCurrentWindow(deltaX: CGFloat, deltaY: CGFloat) {
-        guard let win = currentWindow, let panel else { return }
+        guard let win = currentWindow, panel != nil else { return }
         if !isDraggingTargetWindow {
             setInteractionActive(true)
         }
         isDraggingTargetWindow = true
         snapManager.suppressGlobalDragMonitor = true
-        let newOrigin = CGPoint(x: win.axFrame.origin.x + deltaX, y: win.axFrame.origin.y - deltaY)
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let barH = CGFloat(model.config.windowBarHeight)
+        let screen = AccessibilityBridge.screenContaining(axFrame: win.axFrame)
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        let screenTopAX = screen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
+        let minTopAX = screenTopAX + barH
+        let newOrigin = CGPoint(
+            x: win.axFrame.origin.x + deltaX,
+            y: max(minTopAX, win.axFrame.origin.y - deltaY)
+        )
         AccessibilityBridge.setPosition(win.element, origin: newOrigin)
+        let actualFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
+            ?? CGRect(origin: newOrigin, size: win.axFrame.size)
         let updated = AXWindowInfo(
             pid: win.pid,
             windowID: win.windowID,
             title: win.title,
-            axFrame: CGRect(origin: newOrigin, size: win.axFrame.size),
+            axFrame: actualFrame,
             isMinimized: win.isMinimized,
             isFullScreen: win.isFullScreen,
             element: win.element
         )
         currentWindow = updated
-        if logicalBarFrameCocoa.width > 0 {
-            logicalBarFrameCocoa.origin.x += deltaX
-            logicalBarFrameCocoa.origin.y += deltaY
-        }
-        panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x + deltaX, y: panel.frame.origin.y + deltaY))
-        if let cornerSkirtPanel, cornerSkirtPanel.isVisible {
-            cornerSkirtPanel.setFrameOrigin(NSPoint(x: cornerSkirtPanel.frame.origin.x + deltaX, y: cornerSkirtPanel.frame.origin.y + deltaY))
-        }
-        if let maskPanel = trafficLightMaskPanel, maskPanel.isVisible {
-            maskPanel.setFrameOrigin(NSPoint(x: maskPanel.frame.origin.x + deltaX, y: maskPanel.frame.origin.y + deltaY))
-        }
+        _ = applyOverlayFramesFast(
+            forLiveBounds: actualFrame,
+            windowID: win.windowID,
+            primaryScreenHeight: primaryH,
+            includeBackgroundMasks: false
+        )
         snapManager.updateDragPreview(mouseLocationCocoa: NSEvent.mouseLocation)
     }
 
@@ -2758,7 +2786,8 @@ public final class WindowChromeBarController: NSObject {
             p.backgroundColor = .clear
             p.isOpaque = false
             p.hasShadow = true
-            p.contentView = NSHostingView(rootView: SnapLayoutsPopoverView(
+            p.minSize = .zero
+            let snapHosting = NSHostingView(rootView: SnapLayoutsPopoverView(
                 onSelect: { [weak self] zone in
                     self?.applySnapZone(zone)
                 },
@@ -2773,6 +2802,8 @@ public final class WindowChromeBarController: NSObject {
                     }
                 }
             ))
+            snapHosting.sizingOptions = []
+            p.contentView = snapHosting
             snapPanel = p
         }
 
@@ -2882,11 +2913,28 @@ private struct WindowChromeBarView: View {
             style: .continuous
         )
 
+        let menuTitles = state.menuItems.map(\.title)
+        let notchVisibleMenus = WindowChromeGeometry.visibleMenuCount(
+            forMenuTitles: menuTitles,
+            barWidth: state.leftNotchWidth,
+            maxVisibleMenus: 6,
+            leadingReservedWidth: 27,
+            trailingReservedWidth: 0,
+            minTitleWidth: 56
+        )
+        let floatingVisibleMenus = WindowChromeGeometry.visibleMenuCount(
+            forMenuTitles: menuTitles,
+            barWidth: state.barWidth,
+            maxVisibleMenus: 7
+        )
+
         Group {
             if state.isNotchDocked {
                 HStack(spacing: 0) {
                     HStack(spacing: 0) {
-                        menuStrip(visibleCount: 6)
+                        menuStrip(visibleCount: notchVisibleMenus)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
                         ChromeTitleDragArea(
                             title: "",
                             onViewReady: onLeftDragZoneReady,
@@ -2895,6 +2943,7 @@ private struct WindowChromeBarView: View {
                             onDoubleClick: onDoubleClickTitle
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(0)
                     }
                     .frame(width: state.leftNotchWidth)
                     .frame(maxHeight: .infinity)
@@ -2912,15 +2961,18 @@ private struct WindowChromeBarView: View {
                             onDoubleClick: onDoubleClickTitle
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(0)
 
                         captionButtons(height: barHeight)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
                     }
                     .frame(width: state.rightNotchWidth)
                     .frame(maxHeight: .infinity)
                 }
             } else {
                 HStack(spacing: 0) {
-                    menuStrip(visibleCount: 7)
+                    menuStrip(visibleCount: floatingVisibleMenus)
                         .fixedSize(horizontal: true, vertical: false)
                         .layoutPriority(1)
 
@@ -2940,6 +2992,7 @@ private struct WindowChromeBarView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity)
         .frame(height: barHeight)
         .onHover(perform: onHoverBar)
         .background {
@@ -2970,6 +3023,7 @@ private struct WindowChromeBarView: View {
                     .allowsHitTesting(false)
             }
         }
+        .clipped()
         .clipShape(barShape)
     }
 
@@ -3221,6 +3275,7 @@ private struct DragGhostPreviewView: View {
                             .font(.system(size: 11.5, weight: .regular))
                             .foregroundStyle(ChromeBarAppearance.menuForeground)
                             .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
                     }
@@ -3230,6 +3285,7 @@ private struct DragGhostPreviewView: View {
                             .font(.system(size: 11.5, weight: .regular))
                             .foregroundStyle(ChromeBarAppearance.menuForeground)
                             .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
                     }
@@ -3249,6 +3305,7 @@ private struct DragGhostPreviewView: View {
                         ghostCaptionGlyph("square")
                         ghostCaptionGlyph("xmark")
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .frame(height: barHeight)
 
@@ -3407,6 +3464,9 @@ private final class TitleDragNSView: NSView {
         label.textColor = NSColor.white.withAlphaComponent(0.76)
         label.lineBreakMode = .byTruncatingTail
         label.alignment = .center
+        label.cell?.truncatesLastVisibleLine = true
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -3418,6 +3478,10 @@ private final class TitleDragNSView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }

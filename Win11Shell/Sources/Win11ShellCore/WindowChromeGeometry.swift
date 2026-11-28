@@ -700,4 +700,56 @@ public enum WindowChromeGeometry {
             height: max(minSize.height, maxY - minY)
         )
     }
+
+    /// Computes how many leading menu bar items can fit cleanly inside a chrome bar of `barWidth`
+    /// without truncating labels or overflowing past the caption buttons and minimum title space.
+    public static func visibleMenuCount(
+        forMenuTitles titles: [String],
+        barWidth: CGFloat,
+        maxVisibleMenus: Int = 7,
+        leadingReservedWidth: CGFloat = 27,
+        trailingReservedWidth: CGFloat = 126,
+        minTitleWidth: CGFloat = 110,
+        overflowButtonWidth: CGFloat = 34,
+        itemSpacing: CGFloat = 4,
+        itemHorizontalPadding: CGFloat = 12,
+        estimatedCharWidth: CGFloat = 7.2
+    ) -> Int {
+        guard !titles.isEmpty, maxVisibleMenus > 0 else { return 0 }
+
+        let effectiveMinTitle = min(minTitleWidth, max(48, barWidth * 0.24))
+        let totalBudget = barWidth - leadingReservedWidth - trailingReservedWidth - effectiveMinTitle
+        guard totalBudget > 0 else { return 0 }
+
+        var accumulated: CGFloat = 0
+        var bestCount = 0
+        let limit = min(maxVisibleMenus, titles.count)
+
+        for i in 0..<limit {
+            let itemWidth = max(20, CGFloat(titles[i].count) * estimatedCharWidth) + itemHorizontalPadding
+            let nextAccum = accumulated + (i > 0 ? itemSpacing : 0) + itemWidth
+            let hasOverflow = (i + 1) < titles.count
+            let needed = nextAccum + (hasOverflow ? (itemSpacing + overflowButtonWidth) : 0)
+            if needed <= totalBudget {
+                bestCount = i + 1
+                accumulated = nextAccum
+            } else {
+                break
+            }
+        }
+
+        return bestCount
+    }
+
+    /// Validates that a window-local traffic-light bounding rect sits plausibly in the top-left titlebar band.
+    public static func isValidTrafficLightRelativeRect(_ relRect: CGRect, forWindowSize windowSize: CGSize) -> Bool {
+        windowSize.width >= 100
+            && windowSize.height >= 60
+            && relRect.minX >= -6 && relRect.minX <= 56
+            && relRect.minY >= -6 && relRect.minY <= 56
+            && relRect.width >= 32 && relRect.width <= 120
+            && relRect.height >= 10 && relRect.height <= 42
+            && relRect.maxX <= windowSize.width + 6
+            && relRect.maxY <= windowSize.height + 6
+    }
 }

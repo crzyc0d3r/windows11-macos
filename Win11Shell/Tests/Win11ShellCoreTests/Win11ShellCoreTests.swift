@@ -834,4 +834,63 @@ struct Win11ShellCoreTests {
         )
         #expect(leftSnap.minY == 66) // 38 + 28
     }
+
+    @Test("Dynamic menu folding adapts to narrow popup windows and notch halves without overflow")
+    func dynamicMenuFolding() {
+        let chromeMenus = ["Chrome", "File", "Edit", "View", "History", "Bookmarks", "Profiles", "Tab", "Window", "Help"]
+
+        // Wide window keeps full 7 visible items
+        #expect(WindowChromeGeometry.visibleMenuCount(forMenuTitles: chromeMenus, barWidth: 1277) == 7)
+
+        // Narrow Chrome OAuth popup (~500pt wide) folds excess menus into overflow while preserving title + captions
+        let popupVisible = WindowChromeGeometry.visibleMenuCount(forMenuTitles: chromeMenus, barWidth: 500)
+        #expect(popupVisible >= 3 && popupVisible < 7)
+
+        // Very narrow window folds all menus into overflow button
+        #expect(WindowChromeGeometry.visibleMenuCount(forMenuTitles: chromeMenus, barWidth: 240) == 0)
+
+        // Notch-docked left half has no caption buttons on the left side
+        let notchVisible = WindowChromeGeometry.visibleMenuCount(
+            forMenuTitles: chromeMenus,
+            barWidth: 663.5,
+            maxVisibleMenus: 6,
+            leadingReservedWidth: 27,
+            trailingReservedWidth: 0,
+            minTitleWidth: 56
+        )
+        #expect(notchVisible == 6)
+
+        // Short menu list fits completely without reserving overflow button width
+        let shortMenus = ["App", "File", "Edit"]
+        #expect(WindowChromeGeometry.visibleMenuCount(forMenuTitles: shortMenus, barWidth: 420) == 3)
+    }
+
+    @Test("Traffic light relative rect validation accepts standard titlebar offsets and rejects bogus offsets")
+    func trafficLightRelativeRectValidation() {
+        let popupSize = CGSize(width: 500, height: 650)
+        #expect(WindowChromeGeometry.isValidTrafficLightRelativeRect(
+            CGRect(x: 6, y: 7, width: 64, height: 22),
+            forWindowSize: popupSize
+        ))
+
+        // Bogus origin shifted outside top-left titlebar band
+        #expect(!WindowChromeGeometry.isValidTrafficLightRelativeRect(
+            CGRect(x: 120, y: 7, width: 64, height: 22),
+            forWindowSize: popupSize
+        ))
+        #expect(!WindowChromeGeometry.isValidTrafficLightRelativeRect(
+            CGRect(x: 6, y: 90, width: 64, height: 22),
+            forWindowSize: popupSize
+        ))
+
+        // Bogus tiny or oversized bounds
+        #expect(!WindowChromeGeometry.isValidTrafficLightRelativeRect(
+            CGRect(x: 6, y: 7, width: 12, height: 22),
+            forWindowSize: popupSize
+        ))
+        #expect(!WindowChromeGeometry.isValidTrafficLightRelativeRect(
+            CGRect(x: 6, y: 7, width: 150, height: 22),
+            forWindowSize: popupSize
+        ))
+    }
 }
