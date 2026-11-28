@@ -765,4 +765,73 @@ struct Win11ShellCoreTests {
         )
         #expect(topRight == CGRect(x: 200, y: 150, width: 920, height: 630))
     }
+
+    @Test("Floating windows touching the notch keep their attached chrome bar and non-maximized snaps reserve barHeight")
+    func floatingWindowNotchAndSnapBarReservation() {
+        let primaryH: CGFloat = 982
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 950) // 32pt notch safe area
+
+        // Narrow floating window (e.g. Chrome) touching notch top (y = 32)
+        let floatingAtNotch = CGRect(x: 238, y: 32, width: 973, height: 902)
+        let layout = WindowChromeGeometry.dockedBarLayout(
+            forAXWindowFrame: floatingAtNotch,
+            primaryScreenHeight: primaryH,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            safeAreaTopInset: 32,
+            auxiliaryTopLeftWidth: 663.5,
+            auxiliaryTopRightWidth: 663.5,
+            barHeight: 28,
+            taskbarHeight: 48
+        )
+        #expect(layout?.isNotchDocked == false)
+        #expect(layout?.frameCocoa == CGRect(x: 238, y: 922, width: 973, height: 28))
+
+        #expect(WindowChromeGeometry.shouldAutoNormalizeFocusedWindow(
+            axFrame: floatingAtNotch,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 32
+        ))
+
+        let normalizedFloating = WindowChromeGeometry.normalizedAXFrame(
+            forAXWindowFrame: floatingAtNotch,
+            screenFrameCocoa: screen,
+            visibleFrameCocoa: visible,
+            primaryScreenHeight: primaryH,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 32
+        )
+        #expect(normalizedFloating?.minY == 60) // 32 + 28
+        #expect(normalizedFloating?.minX == 238)
+        #expect(normalizedFloating?.width == 973)
+
+        // Side-snapped zones reserve 28pt bar below notch while maximized docks flush at 38
+        let maxSnap = WindowChromeGeometry.snapAXFrame(
+            for: .maximized,
+            screenFrameCocoa: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+            visibleFrameCocoa: CGRect(x: 0, y: 0, width: 1800, height: 1131),
+            primaryScreenHeight: 1169,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        )
+        #expect(maxSnap.minY == 38)
+
+        let leftSnap = WindowChromeGeometry.snapAXFrame(
+            for: .leftHalf,
+            screenFrameCocoa: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+            visibleFrameCocoa: CGRect(x: 0, y: 0, width: 1800, height: 1131),
+            primaryScreenHeight: 1169,
+            barHeight: 28,
+            taskbarHeight: 48,
+            safeAreaTopInset: 38
+        )
+        #expect(leftSnap.minY == 66) // 38 + 28
+    }
 }

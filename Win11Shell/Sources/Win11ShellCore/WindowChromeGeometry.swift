@@ -76,7 +76,8 @@ public enum WindowChromeGeometry {
         }
 
         let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
-        if safeAreaTopInset >= barHeight && (cocoaWindow.maxY + barHeight) > (maxVisibleTop + 0.5) {
+        let isFullWidth = cocoaWindow.width >= screenFrameCocoa.width - 24
+        if safeAreaTopInset >= barHeight && isFullWidth && (cocoaWindow.maxY + barHeight) > (maxVisibleTop + 0.5) {
             let bezelHeight = min(screenFrameCocoa.height, safeAreaTopInset + 1)
             let bezelRect = CGRect(
                 x: screenFrameCocoa.minX,
@@ -211,13 +212,14 @@ public enum WindowChromeGeometry {
         taskbarHeight: CGFloat,
         safeAreaTopInset: CGFloat = 0
     ) -> CGRect {
+        let maxInsetForZone: CGFloat = (zone == .maximized) ? safeAreaTopInset : 0
         let fullMaxAX = maximizedAXFrame(
             forScreenFrameCocoa: screenFrameCocoa,
             visibleFrameCocoa: visibleFrameCocoa,
             primaryScreenHeight: primaryScreenHeight,
             barHeight: barHeight,
             taskbarHeight: taskbarHeight,
-            safeAreaTopInset: safeAreaTopInset
+            safeAreaTopInset: maxInsetForZone
         )
 
         switch zone {
@@ -267,7 +269,8 @@ public enum WindowChromeGeometry {
 
         let workMinY = screenFrameCocoa.minY + taskbarHeight
         let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
-        let workMaxY = (safeAreaTopInset >= barHeight) ? maxVisibleTop : (maxVisibleTop - barHeight)
+        let isFullWidth = cocoa.width >= screenFrameCocoa.width - 24
+        let workMaxY = (safeAreaTopInset >= barHeight && isFullWidth) ? maxVisibleTop : (maxVisibleTop - barHeight)
         let workHeight = max(120, workMaxY - workMinY)
 
         let extendsAbove = cocoa.maxY > workMaxY + 0.5
@@ -496,7 +499,8 @@ public enum WindowChromeGeometry {
         let cocoa = axRectToCocoa(axFrame, primaryScreenHeight: primaryScreenHeight)
         let workMinY = screenFrameCocoa.minY + taskbarHeight
         let maxVisibleTop = min(visibleFrameCocoa.maxY, screenFrameCocoa.maxY)
-        let workMaxY = (safeAreaTopInset >= barHeight) ? maxVisibleTop : (maxVisibleTop - barHeight)
+        let isFullWidth = cocoa.width >= screenFrameCocoa.width - 24
+        let workMaxY = (safeAreaTopInset >= barHeight && isFullWidth) ? maxVisibleTop : (maxVisibleTop - barHeight)
         let workHeight = max(120, workMaxY - workMinY)
 
         if cocoa.maxY > workMaxY + 1.0 {

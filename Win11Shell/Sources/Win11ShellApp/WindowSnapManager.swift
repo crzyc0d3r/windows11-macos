@@ -184,7 +184,7 @@ public final class WindowSnapManager {
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let barH = CGFloat(model.config.windowBarHeight)
         let screenTopAX = primaryH - min(screen.visibleFrame.maxY, screen.frame.maxY)
-        let minTopAX = screenTopAX + (screen.safeAreaInsets.top >= barH ? 0 : barH)
+        let minTopAX = screenTopAX + barH
 
         let desiredX = cursorAX.x - (baseFrame.width / 2)
         let clampedX = max(screen.frame.minX, min(desiredX, screen.frame.maxX - baseFrame.width))
