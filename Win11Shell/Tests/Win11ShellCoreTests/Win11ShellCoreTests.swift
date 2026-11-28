@@ -895,4 +895,178 @@ struct Win11ShellCoreTests {
             forWindowSize: popupSize
         ))
     }
+
+    @Test("combinedWindowAndBarAXFrame returns the union of window and chrome bar AX rects")
+    func combinedWindowAndBarAXFrameUnion() {
+        let winAX = CGRect(x: 200, y: 180, width: 800, height: 600)
+        let barAX = CGRect(x: 200, y: 152, width: 800, height: 28)
+        let combined = WindowChromeGeometry.combinedWindowAndBarAXFrame(
+            windowAXFrame: winAX,
+            barAXFrame: barAX
+        )
+        #expect(combined == CGRect(x: 200, y: 152, width: 800, height: 628))
+
+        // Detached/clamped bar (e.g. notch-docked wider than window) still unions cleanly
+        let wideBarAX = CGRect(x: 0, y: 0, width: 1800, height: 39)
+        let maximizedWinAX = CGRect(x: 0, y: 38, width: 1800, height: 1083)
+        #expect(
+            WindowChromeGeometry.combinedWindowAndBarAXFrame(
+                windowAXFrame: maximizedWinAX,
+                barAXFrame: wideBarAX
+            ) == CGRect(x: 0, y: 0, width: 1800, height: 1121)
+        )
+    }
+
+    @Test("windowResizeEdge hit-tests all 8 edges, outsets, corners, excludes interior/seam, and respects clipped flags")
+    func windowResizeEdgeHitTesting() {
+        let combined = CGRect(x: 200, y: 152, width: 800, height: 628) // bar 152..<180, window 180..<780
+
+        // All 4 straight edges inside 6pt borderThickness
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 155), combinedFrameAX: combined) == .top)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 777), combinedFrameAX: combined) == .bottom)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 203, y: 400), combinedFrameAX: combined) == .left)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 997, y: 400), combinedFrameAX: combined) == .right)
+
+        // Up to 2pt outset outside outer perimeter
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 150), combinedFrameAX: combined) == .top)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 782), combinedFrameAX: combined) == .bottom)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 198, y: 400), combinedFrameAX: combined) == .left)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 1002, y: 400), combinedFrameAX: combined) == .right)
+
+        // Beyond 2pt outset returns nil
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 149), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 783), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 197, y: 400), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 1003, y: 400), combinedFrameAX: combined) == nil)
+
+        // All 4 14pt corner catch zones (including 2pt outset corners)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 198, y: 150), combinedFrameAX: combined) == .topLeft)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 214, y: 166), combinedFrameAX: combined) == .topLeft)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 1002, y: 150), combinedFrameAX: combined) == .topRight)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 986, y: 166), combinedFrameAX: combined) == .topRight)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 198, y: 782), combinedFrameAX: combined) == .bottomLeft)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 214, y: 766), combinedFrameAX: combined) == .bottomLeft)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 1002, y: 782), combinedFrameAX: combined) == .bottomRight)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 986, y: 766), combinedFrameAX: combined) == .bottomRight)
+
+        // Interior points and internal bar-to-window seam (y = 180) must return nil
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 180), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 215, y: 180), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 166), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 400), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 207, y: 400), combinedFrameAX: combined) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 773), combinedFrameAX: combined) == nil)
+
+        // All 4 is*Clipped flags suppress their edge/corner and outset
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 155), combinedFrameAX: combined, isTopClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 150), combinedFrameAX: combined, isTopClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 202, y: 155), combinedFrameAX: combined, isTopClipped: true) == .left)
+
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 203, y: 400), combinedFrameAX: combined, isLeftClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 199, y: 400), combinedFrameAX: combined, isLeftClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 203, y: 155), combinedFrameAX: combined, isLeftClipped: true) == .top)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 203, y: 777), combinedFrameAX: combined, isLeftClipped: true) == .bottom)
+
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 997, y: 400), combinedFrameAX: combined, isRightClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 1001, y: 400), combinedFrameAX: combined, isRightClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 997, y: 777), combinedFrameAX: combined, isRightClipped: true) == .bottom)
+
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 777), combinedFrameAX: combined, isBottomClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 600, y: 781), combinedFrameAX: combined, isBottomClipped: true) == nil)
+        #expect(WindowChromeGeometry.windowResizeEdge(atAXPoint: CGPoint(x: 997, y: 777), combinedFrameAX: combined, isBottomClipped: true) == .right)
+    }
+
+    @Test("8-edge resizedWindowAXFrame supports bottom corners and clamps minSize, minWindowTopAX, and maxWindowBottomAX")
+    func eightEdgeResizedWindowAXFrameClamping() {
+        let start = CGRect(x: 200, y: 180, width: 800, height: 600)
+        let minTop: CGFloat = 66
+        let maxBottom: CGFloat = 900
+
+        // Top, left, right, topLeft, topRight
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .top,
+                deltaAX: CGSize(width: 0, height: -200),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 200, y: 66, width: 800, height: 714)
+        )
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .left,
+                deltaAX: CGSize(width: -40, height: 30),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 160, y: 180, width: 840, height: 600)
+        )
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .right,
+                deltaAX: CGSize(width: 60, height: -20),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 200, y: 180, width: 860, height: 600)
+        )
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .topLeft,
+                deltaAX: CGSize(width: 700, height: 550),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 740, y: 620, width: 260, height: 160)
+        )
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .topRight,
+                deltaAX: CGSize(width: -700, height: -200),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 200, y: 66, width: 260, height: 714)
+        )
+
+        // Bottom resize clamps at maxWindowBottomAX and minSize.height without moving top (minY = 180)
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .bottom,
+                deltaAX: CGSize(width: 25, height: 250),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 200, y: 180, width: 800, height: 720)
+        )
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .bottom,
+                deltaAX: CGSize(width: 0, height: -500),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 200, y: 180, width: 800, height: 160)
+        )
+
+        // bottomLeft and bottomRight clamp both dimensions and keep top fixed
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .bottomLeft,
+                deltaAX: CGSize(width: 650, height: 200),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 740, y: 180, width: 260, height: 720)
+        )
+        #expect(
+            WindowChromeGeometry.resizedWindowAXFrame(
+                startWindowAXFrame: start,
+                edge: .bottomRight,
+                deltaAX: CGSize(width: -700, height: -520),
+                minWindowTopAX: minTop,
+                maxWindowBottomAX: maxBottom
+            ) == CGRect(x: 200, y: 180, width: 260, height: 160)
+        )
+    }
 }

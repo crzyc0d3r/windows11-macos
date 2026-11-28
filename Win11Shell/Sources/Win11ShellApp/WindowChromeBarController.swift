@@ -20,9 +20,11 @@ private enum ChromeBarAppearance {
     static let inactiveCaptionForeground = Color.white.opacity(0.56)
     static let hoverFill = Color.white.opacity(0.12)
     static let closeHoverFill = Color(red: 0.77, green: 0.17, blue: 0.11)
-    static let floatingTopCornerRadius: CGFloat = 12
-    static let windowInnerCornerRadius: CGFloat = 15
-    static let cornerSkirtHeight: CGFloat = 20
+    static let floatingTopCornerRadius: CGFloat = 8
+    static let windowInnerCornerRadius: CGFloat = 16
+    static let cornerSkirtHeight: CGFloat = 24
+    static let topRimOverlap: CGFloat = 1.5
+    static let edgeRimInset: CGFloat = 1.0
 }
 
 private struct FloatingChromeCapShape: Shape {
@@ -30,6 +32,8 @@ private struct FloatingChromeCapShape: Shape {
     let topCornerRadius: CGFloat
     let innerCornerRadius: CGFloat
     let skirtHeight: CGFloat
+    var topRimOverlap: CGFloat = ChromeBarAppearance.topRimOverlap
+    var edgeRimInset: CGFloat = ChromeBarAppearance.edgeRimInset
     var roundTopLeft: Bool = true
     var roundTopRight: Bool = true
 
@@ -49,13 +53,16 @@ private struct FloatingChromeCapShape: Shape {
             return outer
         }
 
+        let leftInset: CGFloat = roundTopLeft ? edgeRimInset : 0
+        let rightInset: CGFloat = roundTopRight ? edgeRimInset : 0
         let leftExtend: CGFloat = roundTopLeft ? 0 : innerCornerRadius * 2
         let rightExtend: CGFloat = roundTopRight ? 0 : innerCornerRadius * 2
+        let cutoutY = rect.minY + barHeight + topRimOverlap
         let cutoutRect = CGRect(
-            x: rect.minX - leftExtend,
-            y: rect.minY + barHeight,
-            width: rect.width + leftExtend + rightExtend,
-            height: max(rect.height - barHeight + innerCornerRadius * 2, innerCornerRadius * 3)
+            x: rect.minX + leftInset - leftExtend,
+            y: cutoutY,
+            width: max(0, rect.width - leftInset - rightInset + leftExtend + rightExtend),
+            height: max(rect.height - barHeight - topRimOverlap + innerCornerRadius * 2, innerCornerRadius * 3)
         )
         let cutout = RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous).path(in: cutoutRect)
         return outer.subtracting(cutout)
@@ -64,21 +71,25 @@ private struct FloatingChromeCapShape: Shape {
 
 private struct CornerSkirtCutoutShape: Shape {
     let innerCornerRadius: CGFloat
+    var topRimOverlap: CGFloat = ChromeBarAppearance.topRimOverlap
+    var edgeRimInset: CGFloat = ChromeBarAppearance.edgeRimInset
     var roundTopLeft: Bool = true
     var roundTopRight: Bool = true
 
     func path(in rect: CGRect) -> Path {
         let outer = Rectangle().path(in: rect)
-        guard innerCornerRadius > 0.5, rect.width > 1, rect.height > 1 else {
+        guard innerCornerRadius > 0.5, rect.width > 2, rect.height > topRimOverlap + 0.5 else {
             return outer
         }
+        let leftInset: CGFloat = roundTopLeft ? edgeRimInset : 0
+        let rightInset: CGFloat = roundTopRight ? edgeRimInset : 0
         let leftExtend: CGFloat = roundTopLeft ? 0 : innerCornerRadius * 2
         let rightExtend: CGFloat = roundTopRight ? 0 : innerCornerRadius * 2
         let cutoutRect = CGRect(
-            x: rect.minX - leftExtend,
-            y: rect.minY,
-            width: rect.width + leftExtend + rightExtend,
-            height: rect.height + innerCornerRadius * 2
+            x: rect.minX + leftInset - leftExtend,
+            y: rect.minY + topRimOverlap,
+            width: max(0, rect.width - leftInset - rightInset + leftExtend + rightExtend),
+            height: max(0, rect.height - topRimOverlap + innerCornerRadius * 2)
         )
         let cutout = RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous).path(in: cutoutRect)
         return outer.subtracting(cutout)
@@ -86,17 +97,24 @@ private struct CornerSkirtCutoutShape: Shape {
 }
 
 private struct OccludedBarMaskShape: Shape {
-    let topLeadingRadius: CGFloat
-    let topTrailingRadius: CGFloat
+    let barHeight: CGFloat
+    let topCornerRadius: CGFloat
+    let innerCornerRadius: CGFloat
+    let skirtHeight: CGFloat
+    let roundTopLeft: Bool
+    let roundTopRight: Bool
     let occludedLocalRects: [CGRect]
 
     func path(in rect: CGRect) -> Path {
-        let base = UnevenRoundedRectangle(
-            topLeadingRadius: topLeadingRadius,
-            bottomLeadingRadius: 0,
-            bottomTrailingRadius: 0,
-            topTrailingRadius: topTrailingRadius,
-            style: .continuous
+        let base = FloatingChromeCapShape(
+            barHeight: barHeight,
+            topCornerRadius: topCornerRadius,
+            innerCornerRadius: innerCornerRadius,
+            skirtHeight: skirtHeight,
+            topRimOverlap: ChromeBarAppearance.topRimOverlap,
+            edgeRimInset: ChromeBarAppearance.edgeRimInset,
+            roundTopLeft: roundTopLeft,
+            roundTopRight: roundTopRight
         ).path(in: rect)
 
         guard !occludedLocalRects.isEmpty else {
@@ -152,7 +170,7 @@ private final class ChromeBarHostingView<Content: View>: NSHostingView<Content> 
     }
 
     private var resizeTrackingArea: NSTrackingArea?
-    private var currentResizeEdge: WindowChromeGeometry.ChromeBarResizeEdge?
+    private var currentResizeEdge: WindowChromeGeometry.WindowResizeEdge?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -161,7 +179,7 @@ private final class ChromeBarHostingView<Content: View>: NSHostingView<Content> 
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect],
+            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -197,11 +215,11 @@ private final class ChromeBarHostingView<Content: View>: NSHostingView<Content> 
         super.resetCursorRects()
         guard isResizeAllowed, bounds.width > 20, bounds.height > 10 else { return }
 
-        let topH: CGFloat = 5
-        let sideW: CGFloat = 5
-        let corner: CGFloat = 10
+        let topH: CGFloat = 6
+        let sideW: CGFloat = 6
+        let corner: CGFloat = 14
 
-        func addTopLeftRect(_ topLeftRect: CGRect, edge: WindowChromeGeometry.ChromeBarResizeEdge) {
+        func addTopLeftRect(_ topLeftRect: CGRect, edge: WindowChromeGeometry.WindowResizeEdge) {
             let y = isFlipped ? topLeftRect.minY : (bounds.height - topLeftRect.maxY)
             let viewRect = CGRect(x: topLeftRect.minX, y: y, width: topLeftRect.width, height: topLeftRect.height)
                 .intersection(bounds)
@@ -249,30 +267,41 @@ private final class ChromeBarHostingView<Content: View>: NSHostingView<Content> 
         }
     }
 
-    private func resizeEdge(atViewPoint pt: NSPoint) -> WindowChromeGeometry.ChromeBarResizeEdge? {
-        guard isResizeAllowed else { return nil }
+    private func resizeEdge(atViewPoint pt: NSPoint) -> WindowChromeGeometry.WindowResizeEdge? {
+        guard isResizeAllowed, bounds.contains(pt) else { return nil }
         let topLeftPt = CGPoint(x: pt.x, y: isFlipped ? pt.y : (bounds.height - pt.y))
-        return WindowChromeGeometry.chromeBarResizeEdge(
-            atLocalPoint: topLeftPt,
-            barSize: bounds.size,
+        let extendedFrame = CGRect(x: 0, y: 0, width: bounds.width, height: max(bounds.height + 100, 200))
+        return WindowChromeGeometry.windowResizeEdge(
+            atAXPoint: topLeftPt,
+            combinedFrameAX: extendedFrame,
+            borderThickness: 6,
+            outset: 0,
+            cornerSize: 14,
             isTopClipped: isTopClipped,
             isLeftClipped: isLeftClipped,
-            isRightClipped: isRightClipped
+            isRightClipped: isRightClipped,
+            isBottomClipped: true
         )
     }
 
-    static func cursor(for edge: WindowChromeGeometry.ChromeBarResizeEdge) -> NSCursor {
+    static func cursor(for edge: WindowChromeGeometry.WindowResizeEdge) -> NSCursor {
         switch edge {
         case .top:
             return NSCursor.frameResize(position: .top, directions: .all)
-        case .topLeft:
-            return NSCursor.frameResize(position: .topLeft, directions: .all)
-        case .topRight:
-            return NSCursor.frameResize(position: .topRight, directions: .all)
+        case .bottom:
+            return NSCursor.frameResize(position: .bottom, directions: .all)
         case .left:
             return NSCursor.frameResize(position: .left, directions: .all)
         case .right:
             return NSCursor.frameResize(position: .right, directions: .all)
+        case .topLeft:
+            return NSCursor.frameResize(position: .topLeft, directions: .all)
+        case .topRight:
+            return NSCursor.frameResize(position: .topRight, directions: .all)
+        case .bottomLeft:
+            return NSCursor.frameResize(position: .bottomLeft, directions: .all)
+        case .bottomRight:
+            return NSCursor.frameResize(position: .bottomRight, directions: .all)
         }
     }
 }
@@ -330,6 +359,7 @@ private final class BackgroundChromeBarState {
     var windowTitle: String = ""
     var isMaximized: Bool = false
     var barHeight: CGFloat = 28
+    var cornerSkirtHeight: CGFloat = 0
     var isLeftEdgeClipped: Bool = false
     var isRightEdgeClipped: Bool = false
     var isNotchDocked: Bool = false
@@ -350,7 +380,7 @@ private final class DragGhostState {
     var snapshot: NSImage?
     var snapshotOriginalSize: CGSize = .zero
     var trafficLightMaskRectLocal: CGRect?
-    var trafficLightMaskColor: NSColor?
+    var trafficLightMaskStyle: SampledTitlebarStyle?
 }
 
 @MainActor
@@ -374,18 +404,26 @@ public final class WindowChromeBarController: NSObject {
         var bundleID: String
         var zOrderIndex: Int
         var axBarRect: CGRect
+        var axPanelRect: CGRect
         var axWindowFrame: CGRect
         var baseOccludingRectsAX: [CGRect]
     }
 
-    private struct ActiveBarResize {
+    private struct ActiveWindowResize {
         let window: AXWindowInfo
-        let edge: WindowChromeGeometry.ChromeBarResizeEdge
+        let bundleID: String
+        let edge: WindowChromeGeometry.WindowResizeEdge
         let startMouseAX: CGPoint
         let startWindowFrameAX: CGRect
         let minWindowTopAX: CGFloat
-        var lastAppliedFrameAX: CGRect
-        var lastApplyTimestamp: TimeInterval
+        let maxWindowBottomAX: CGFloat?
+        var currentTargetFrameAX: CGRect
+        var didCrossThreshold: Bool
+        var didStartVisualGhost: Bool
+        var waitingForSnapshot: Bool
+        var lastVisualUpdateTimestamp: TimeInterval
+        var lastGhostMenuWidth: CGFloat
+        let generation: UInt64
     }
 
     private let model: RunningAppsModel
@@ -399,6 +437,9 @@ public final class WindowChromeBarController: NSObject {
     private var logicalBarFrameCocoa: CGRect = .zero
     private var snapPanel: NonActivatingFloatingPanel?
     private var dragGhostPanel: NonActivatingFloatingPanel?
+    private var resizeCursorPanel: NonActivatingFloatingPanel?
+    private var resizeCursorView: ResizeCursorOverlayView?
+    private var currentHoverResizeEdge: WindowChromeGeometry.WindowResizeEdge?
     private var trafficLightMaskPanel: NonActivatingFloatingPanel?
     private var trafficLightMaskView: TrafficLightMaskNSView?
     private var backgroundMasks: [CGWindowID: (panel: NonActivatingFloatingPanel, view: TrafficLightMaskNSView, pid: pid_t)] = [:]
@@ -408,8 +449,10 @@ public final class WindowChromeBarController: NSObject {
     private var noTrafficLightWindowIDs: Set<CGWindowID> = []
     private weak var dragZoneNSView: NSView?
     private weak var leftNotchDragZoneNSView: NSView?
-    private var sampledMaskColors: [String: NSColor] = [:]
-    private var pendingMaskColorKeys: Set<String> = []
+    private var sampledTitlebarStyles: [String: SampledTitlebarStyle] = [:]
+    private var pendingStyleKeys: Set<String> = []
+    private var failedStyleSampleTimes: [String: TimeInterval] = [:]
+    private var lastHasScreenRecordingPermission: Bool = AccessibilityBridge.hasScreenRecordingPermission()
     private var cachedDragSnapshot: (windowID: CGWindowID, image: NSImage, size: CGSize, capturedAt: TimeInterval)?
     private var snapshotCaptureInFlightWID: CGWindowID?
     private var hiddenDragAppPID: pid_t?
@@ -423,7 +466,7 @@ public final class WindowChromeBarController: NSObject {
     private var currentWindow: AXWindowInfo?
     private var currentBundleID: String = ""
     private var isDraggingTargetWindow = false
-    private var activeBarResize: ActiveBarResize?
+    private var activeWindowResize: ActiveWindowResize?
     private var isReportingInteraction = false
     private var isExternalMouseDragging = false
     private var isBlockingNativeTitlebarDrag = false
@@ -441,6 +484,7 @@ public final class WindowChromeBarController: NSObject {
     private var dragGhostGrabOffsetAX: CGPoint = .zero
     private var dragMinSafeAXTop: CGFloat = 28
     private nonisolated static let syntheticEventTag: Int64 = 0x57313153
+    private static let maximumCursorLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
 
     private struct NativeDragGuard {
         let pid: pid_t
@@ -479,10 +523,15 @@ public final class WindowChromeBarController: NSObject {
                     self.setInteractionActive(false)
                     self.restoreHiddenDragAppIfNeeded()
                 }
-                if self.activeBarResize != nil && !physicalLeftDown {
-                    self.activeBarResize = nil
+                if self.activeWindowResize != nil && !self.isFinishingDragDrop && !physicalLeftDown {
+                    self.dragSnapshotTimeoutWork?.cancel()
+                    self.dragSnapshotTimeoutWork = nil
+                    self.dragGhostPanel?.orderOut(nil)
+                    self.activeWindowResize = nil
                     self.snapManager.suppressGlobalDragMonitor = false
+                    self.hideResizeCursor()
                     self.setInteractionActive(false)
+                    self.restoreHiddenDragAppIfNeeded()
                 }
                 self.syncActiveWindow()
             }
@@ -601,9 +650,13 @@ public final class WindowChromeBarController: NSObject {
                 guard let self, pid != 0 else { return }
                 self.cachedMenusByPID.removeValue(forKey: pid)
                 let pidPrefix = "\(pid)-"
-                let expiredWIDs = self.sampledMaskColors.keys
+                let expiredWIDs = self.sampledTitlebarStyles.keys
                     .filter { $0.hasPrefix(pidPrefix) }
-                    .compactMap { UInt32($0.dropFirst(pidPrefix.count)) }
+                    .compactMap { key -> CGWindowID? in
+                        let rest = key.dropFirst(pidPrefix.count)
+                        guard let widPart = rest.split(separator: "-").first else { return nil }
+                        return UInt32(widPart)
+                    }
                 for wid in expiredWIDs {
                     self.cachedMaskRelativeOffsets.removeValue(forKey: wid)
                     self.noTrafficLightWindowIDs.remove(wid)
@@ -630,7 +683,9 @@ public final class WindowChromeBarController: NSObject {
                 if self.hiddenDragAppPID == pid {
                     self.hiddenDragAppPID = nil
                 }
-                self.sampledMaskColors = self.sampledMaskColors.filter { !$0.key.hasPrefix(pidPrefix) }
+                self.sampledTitlebarStyles = self.sampledTitlebarStyles.filter { !$0.key.hasPrefix(pidPrefix) }
+                self.pendingStyleKeys = self.pendingStyleKeys.filter { !$0.hasPrefix(pidPrefix) }
+                self.failedStyleSampleTimes = self.failedStyleSampleTimes.filter { !$0.key.hasPrefix(pidPrefix) }
                 if self.lastMenuPID == pid {
                     self.lastMenuPID = 0
                 }
@@ -679,7 +734,9 @@ public final class WindowChromeBarController: NSObject {
     }
 
     public func syncActiveWindow() {
-        if isDraggingTargetWindow || isFinishingDragDrop || activeBarResize != nil {
+        invalidateScreenRecordingCooldownIfNeeded()
+
+        if isDraggingTargetWindow || isFinishingDragDrop || activeWindowResize != nil {
             return
         }
 
@@ -701,7 +758,7 @@ public final class WindowChromeBarController: NSObject {
         var effectiveWin = win
         var effectiveScreen = screen
         if !isDraggingTargetWindow
-            && activeBarResize == nil
+            && activeWindowResize == nil
             && !isExternalMouseDragging
             && !CGEventSource.buttonState(.hidSystemState, button: .left)
             && NSEvent.pressedMouseButtons == 0 {
@@ -788,9 +845,13 @@ public final class WindowChromeBarController: NSObject {
         currentWindow = effectiveWin
         currentBundleID = bundleID
         if effectiveWin.windowID != 0 {
+            let cachedRel = cachedMaskRelativeOffsets[effectiveWin.windowID]
             if var existingMeta = cachedWindowMeta[effectiveWin.windowID] {
                 existingMeta.title = effectiveWin.title
                 existingMeta.isFullScreen = effectiveWin.isFullScreen
+                if existingMeta.trafficLightRelOffset == nil, let cachedRel {
+                    existingMeta.trafficLightRelOffset = cachedRel
+                }
                 cachedWindowMeta[effectiveWin.windowID] = existingMeta
             } else {
                 cachedWindowMeta[effectiveWin.windowID] = CachedWindowMeta(
@@ -798,7 +859,7 @@ public final class WindowChromeBarController: NSObject {
                     isStandard: true,
                     isFullScreen: effectiveWin.isFullScreen,
                     title: effectiveWin.title,
-                    trafficLightRelOffset: cachedMaskRelativeOffsets[effectiveWin.windowID]
+                    trafficLightRelOffset: cachedRel
                 )
             }
         }
@@ -904,6 +965,7 @@ public final class WindowChromeBarController: NSObject {
         cornerSkirtPanel?.orderOut(nil)
         snapPanel?.orderOut(nil)
         dragGhostPanel?.orderOut(nil)
+        hideResizeCursor()
         trafficLightMaskPanel?.orderOut(nil)
         if !model.config.showWindowChromeBar {
             hideAllBackgroundOverlays()
@@ -1087,12 +1149,12 @@ public final class WindowChromeBarController: NSObject {
         let dynamicOccluders = [draggedWindowAXFrame, draggedBarAXRect].filter { !$0.isEmpty && !$0.isNull }
         for (wid, entry) in backgroundBars {
             let combinedOccluders = entry.baseOccludingRectsAX + dynamicOccluders
-            if WindowChromeGeometry.isFullyOccluded(entry.axBarRect, occludedBy: combinedOccluders) {
+            if WindowChromeGeometry.isFullyOccluded(entry.axPanelRect, occludedBy: combinedOccluders) {
                 if entry.panel.isVisible {
                     entry.panel.orderOut(nil)
                 }
             } else {
-                let occludedLocal = WindowChromeGeometry.occludedLocalRects(in: entry.axBarRect, occludedBy: combinedOccluders)
+                let occludedLocal = WindowChromeGeometry.occludedLocalRects(in: entry.axPanelRect, occludedBy: combinedOccluders)
                 if entry.barState.occludedLocalRects != occludedLocal {
                     entry.barState.occludedLocalRects = occludedLocal
                     entry.hostingView.occludedLocalRects = occludedLocal
@@ -1108,7 +1170,7 @@ public final class WindowChromeBarController: NSObject {
 
     private func syncOverlayPositionsFromWindowServer() {
         guard !isDraggingTargetWindow,
-              activeBarResize == nil,
+              activeWindowResize == nil,
               let win = currentWindow,
               let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
         else {
@@ -1220,8 +1282,6 @@ public final class WindowChromeBarController: NSObject {
                 let bgBarRectCocoa = layout.frameCocoa
                 let bgBarAXRect = WindowChromeGeometry.cocoaRectToAX(bgBarRectCocoa, primaryScreenHeight: primaryScreenHeight)
                 let baseOccluders = occludingRectsAX
-                let fullyOccluded = WindowChromeGeometry.isFullyOccluded(bgBarAXRect, occludedBy: occludingRectsAX)
-                activeBarIDs.insert(snap.windowID)
 
                 let bgAXInfo = AXWindowInfo(
                     pid: snap.pid,
@@ -1234,6 +1294,18 @@ public final class WindowChromeBarController: NSObject {
                 )
                 let bgIsMax = snapManager.isWindowMaximized(bgAXInfo, on: screen)
                 let bgWindowCocoa = WindowChromeGeometry.axRectToCocoa(snap.axBounds, primaryScreenHeight: primaryScreenHeight)
+                let (renderedBgPanelCocoa, rawBgSkirt) = WindowChromeGeometry.renderedBarPanelFrame(
+                    for: layout,
+                    windowCocoaFrame: bgWindowCocoa,
+                    skirtHeight: ChromeBarAppearance.cornerSkirtHeight
+                )
+                let bgEffectiveSkirt: CGFloat = bgIsMax ? 0 : rawBgSkirt
+                let effectivePanelCocoa = bgEffectiveSkirt > 0.5 ? renderedBgPanelCocoa : bgBarRectCocoa
+                let bgPanelAXRect = WindowChromeGeometry.cocoaRectToAX(effectivePanelCocoa, primaryScreenHeight: primaryScreenHeight)
+
+                let fullyOccluded = WindowChromeGeometry.isFullyOccluded(bgPanelAXRect, occludedBy: occludingRectsAX)
+                activeBarIDs.insert(snap.windowID)
+
                 let leftClipped = bgWindowCocoa.minX < bgBarRectCocoa.minX - 1.0
                 let rightClipped = bgWindowCocoa.maxX > bgBarRectCocoa.maxX + 1.0
                 let displayTitle = meta.title.isEmpty ? (app?.localizedName ?? snap.ownerName) : meta.title
@@ -1243,13 +1315,15 @@ public final class WindowChromeBarController: NSObject {
                     if var existing = backgroundBars[snap.windowID] {
                         existing.zOrderIndex = snapIndex
                         existing.axBarRect = bgBarAXRect
+                        existing.axPanelRect = bgPanelAXRect
                         existing.axWindowFrame = snap.axBounds
                         existing.baseOccludingRectsAX = baseOccluders
+                        existing.barState.cornerSkirtHeight = bgEffectiveSkirt
                         existing.panel.orderOut(nil)
                         backgroundBars[snap.windowID] = existing
                     }
                 } else {
-                    let occludedLocal = WindowChromeGeometry.occludedLocalRects(in: bgBarAXRect, occludedBy: occludingRectsAX)
+                    let occludedLocal = WindowChromeGeometry.occludedLocalRects(in: bgPanelAXRect, occludedBy: occludingRectsAX)
                     var entry: BackgroundBarEntry
                     if let existing = backgroundBars[snap.windowID] {
                         entry = existing
@@ -1258,7 +1332,7 @@ public final class WindowChromeBarController: NSObject {
                         let hosting = OccludedBarHostingView(rootView: BackgroundChromeBarView(state: barState))
                         hosting.sizingOptions = []
                         let p = NonActivatingFloatingPanel(
-                            contentRect: bgBarRectCocoa,
+                            contentRect: effectivePanelCocoa,
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered,
                             defer: false
@@ -1283,6 +1357,7 @@ public final class WindowChromeBarController: NSObject {
                             bundleID: bundleID,
                             zOrderIndex: snapIndex,
                             axBarRect: bgBarAXRect,
+                            axPanelRect: bgPanelAXRect,
                             axWindowFrame: snap.axBounds,
                             baseOccludingRectsAX: baseOccluders
                         )
@@ -1292,12 +1367,14 @@ public final class WindowChromeBarController: NSObject {
                     entry.bundleID = bundleID
                     entry.zOrderIndex = snapIndex
                     entry.axBarRect = bgBarAXRect
+                    entry.axPanelRect = bgPanelAXRect
                     entry.axWindowFrame = snap.axBounds
                     entry.baseOccludingRectsAX = baseOccluders
                     entry.barState.appIcon = appIcon
                     entry.barState.windowTitle = displayTitle
                     entry.barState.isMaximized = bgIsMax
                     entry.barState.barHeight = bgBarRectCocoa.height
+                    entry.barState.cornerSkirtHeight = bgEffectiveSkirt
                     entry.barState.isLeftEdgeClipped = leftClipped
                     entry.barState.isRightEdgeClipped = rightClipped
                     entry.barState.isNotchDocked = false
@@ -1313,7 +1390,7 @@ public final class WindowChromeBarController: NSObject {
                         entry.panel.level = .floating
                     }
                     entry.panel.ignoresMouseEvents = true
-                    setPanelFrameFast(entry.panel, to: bgBarRectCocoa)
+                    setPanelFrameFast(entry.panel, to: effectivePanelCocoa)
                     if !entry.panel.isVisible {
                         entry.panel.displayIfNeeded()
                         entry.panel.orderFrontRegardless()
@@ -1366,8 +1443,23 @@ public final class WindowChromeBarController: NSObject {
                         backgroundMasks[snap.windowID] = entry
                     }
 
-                    let colorKey = "\(snap.pid)-\(snap.windowID)"
-                    entry.view.fillColor = sampledMaskColors[colorKey] ?? defaultMaskFallbackColor()
+                    let inactiveKey = styleKey(pid: snap.pid, windowID: snap.windowID, isActive: false)
+                    let activeFallbackKey = styleKey(pid: snap.pid, windowID: snap.windowID, isActive: true)
+                    let styleToApply = sampledTitlebarStyles[inactiveKey]
+                        ?? sampledTitlebarStyles[activeFallbackKey]
+                        ?? defaultMaskStyleFallback()
+                    entry.view.applyStyle(styleToApply)
+
+                    if sampledTitlebarStyles[inactiveKey] == nil {
+                        requestTitlebarStyleSample(
+                            pid: snap.pid,
+                            windowID: snap.windowID,
+                            windowAXFrame: snap.axBounds,
+                            buttonUnionAXRect: bgMaskAX,
+                            isActive: false
+                        )
+                    }
+
                     setPanelFrameFast(entry.panel, to: cocoaRect)
                     if !entry.panel.isVisible {
                         entry.panel.displayIfNeeded()
@@ -1404,7 +1496,25 @@ public final class WindowChromeBarController: NSObject {
         includeTrafficLight: Bool,
         resolvedPIDsThisPass: inout Set<pid_t>
     ) -> CachedWindowMeta? {
-        if let cached = cachedWindowMeta[snap.windowID] {
+        if var cached = cachedWindowMeta[snap.windowID] {
+            if includeTrafficLight && cached.trafficLightRelOffset == nil {
+                if let cachedRel = cachedMaskRelativeOffsets[snap.windowID] {
+                    cached.trafficLightRelOffset = cachedRel
+                    cachedWindowMeta[snap.windowID] = cached
+                } else if !noTrafficLightWindowIDs.contains(snap.windowID),
+                          !resolvedPIDsThisPass.contains(snap.pid) {
+                    resolvedPIDsThisPass.insert(snap.pid)
+                    if let axWin = AccessibilityBridge.standardWindows(for: snap.pid).first(where: { $0.windowID == snap.windowID }) {
+                        if let computed = AccessibilityBridge.trafficLightRelativeRect(for: axWin.element) {
+                            cachedMaskRelativeOffsets[snap.windowID] = computed
+                            cached.trafficLightRelOffset = computed
+                            cachedWindowMeta[snap.windowID] = cached
+                        } else {
+                            noTrafficLightWindowIDs.insert(snap.windowID)
+                        }
+                    }
+                }
+            }
             return cached
         }
         guard !resolvedPIDsThisPass.contains(snap.pid) else {
@@ -1425,12 +1535,13 @@ public final class WindowChromeBarController: NSObject {
                     noTrafficLightWindowIDs.insert(axWin.windowID)
                 }
             }
+            let existingRel = cachedWindowMeta[axWin.windowID]?.trafficLightRelOffset
             cachedWindowMeta[axWin.windowID] = CachedWindowMeta(
                 pid: snap.pid,
                 isStandard: true,
                 isFullScreen: axWin.isFullScreen,
                 title: axWin.title,
-                trafficLightRelOffset: rel
+                trafficLightRelOffset: rel ?? existingRel
             )
         }
 
@@ -1483,28 +1594,40 @@ public final class WindowChromeBarController: NSObject {
             return
         }
 
-        let axMaskRect: CGRect
-        if win.windowID != 0, let rel = cachedMaskRelativeOffsets[win.windowID] {
-            axMaskRect = CGRect(
-                x: win.axFrame.minX + rel.minX,
-                y: win.axFrame.minY + rel.minY,
-                width: rel.width,
-                height: rel.height
-            )
-        } else if let rel = AccessibilityBridge.trafficLightRelativeRect(for: win.element) {
+        let resolvedRel: CGRect
+        if win.windowID != 0, let cachedRel = cachedMaskRelativeOffsets[win.windowID] {
+            resolvedRel = cachedRel
+        } else if let computedRel = AccessibilityBridge.trafficLightRelativeRect(for: win.element) {
+            resolvedRel = computedRel
             if win.windowID != 0 {
-                cachedMaskRelativeOffsets[win.windowID] = rel
+                cachedMaskRelativeOffsets[win.windowID] = computedRel
             }
-            axMaskRect = CGRect(
-                x: win.axFrame.minX + rel.minX,
-                y: win.axFrame.minY + rel.minY,
-                width: rel.width,
-                height: rel.height
-            )
         } else {
             trafficLightMaskPanel?.orderOut(nil)
             return
         }
+
+        if win.windowID != 0 {
+            if var meta = cachedWindowMeta[win.windowID] {
+                meta.trafficLightRelOffset = resolvedRel
+                cachedWindowMeta[win.windowID] = meta
+            } else {
+                cachedWindowMeta[win.windowID] = CachedWindowMeta(
+                    pid: win.pid,
+                    isStandard: true,
+                    isFullScreen: win.isFullScreen,
+                    title: win.title,
+                    trafficLightRelOffset: resolvedRel
+                )
+            }
+        }
+
+        let axMaskRect = CGRect(
+            x: win.axFrame.minX + resolvedRel.minX,
+            y: win.axFrame.minY + resolvedRel.minY,
+            width: resolvedRel.width,
+            height: resolvedRel.height
+        )
 
         let barOverlap = axMaskRect.intersection(barAXRect)
         if !barOverlap.isEmpty && barOverlap.height > 2 {
@@ -1532,29 +1655,21 @@ public final class WindowChromeBarController: NSObject {
             trafficLightMaskView = maskView
         }
 
-        let colorKey = "\(win.pid)-\(win.windowID)"
-        let fallbackColor = defaultMaskFallbackColor()
-        trafficLightMaskView?.fillColor = sampledMaskColors[colorKey] ?? fallbackColor
+        let activeKey = styleKey(pid: win.pid, windowID: win.windowID, isActive: true)
+        let inactiveFallbackKey = styleKey(pid: win.pid, windowID: win.windowID, isActive: false)
+        let styleToApply = sampledTitlebarStyles[activeKey]
+            ?? sampledTitlebarStyles[inactiveFallbackKey]
+            ?? defaultMaskStyleFallback()
+        trafficLightMaskView?.applyStyle(styleToApply)
 
-        if !pendingMaskColorKeys.contains(colorKey) && sampledMaskColors[colorKey] == nil {
-            pendingMaskColorKeys.insert(colorKey)
-            let windowID = win.windowID
-            let windowAXFrame = win.axFrame
-            Task { @MainActor [weak self] in
-                let sampled = await AccessibilityBridge.sampleTitlebarColor(
-                    windowID: windowID,
-                    windowAXFrame: windowAXFrame,
-                    buttonUnionAXRect: axMaskRect
-                )
-                guard let self else { return }
-                self.pendingMaskColorKeys.remove(colorKey)
-                if let sampled {
-                    self.sampledMaskColors[colorKey] = sampled
-                    if let cur = self.currentWindow, "\(cur.pid)-\(cur.windowID)" == colorKey {
-                        self.trafficLightMaskView?.fillColor = sampled
-                    }
-                }
-            }
+        if sampledTitlebarStyles[activeKey] == nil {
+            requestTitlebarStyleSample(
+                pid: win.pid,
+                windowID: win.windowID,
+                windowAXFrame: win.axFrame,
+                buttonUnionAXRect: axMaskRect,
+                isActive: true
+            )
         }
 
         if let maskPanel = trafficLightMaskPanel {
@@ -1566,11 +1681,81 @@ public final class WindowChromeBarController: NSObject {
         }
     }
 
+    private func styleKey(pid: pid_t, windowID: CGWindowID, isActive: Bool) -> String {
+        "\(pid)-\(windowID)-\(isActive ? "a" : "i")"
+    }
+
+    private func invalidateScreenRecordingCooldownIfNeeded() {
+        let hasSR = AccessibilityBridge.hasScreenRecordingPermission()
+        if hasSR && !lastHasScreenRecordingPermission {
+            failedStyleSampleTimes.removeAll()
+            pendingStyleKeys.removeAll()
+            sampledTitlebarStyles.removeAll()
+            for wid in cachedWindowMeta.keys {
+                AccessibilityBridge.invalidateCaptureFilter(for: wid)
+            }
+            cachedDragSnapshot = nil
+        }
+        lastHasScreenRecordingPermission = hasSR
+    }
+
+    private func requestTitlebarStyleSample(
+        pid: pid_t,
+        windowID: CGWindowID,
+        windowAXFrame: CGRect,
+        buttonUnionAXRect: CGRect,
+        isActive: Bool
+    ) {
+        guard windowID != 0 else { return }
+        let key = styleKey(pid: pid, windowID: windowID, isActive: isActive)
+        guard sampledTitlebarStyles[key] == nil, !pendingStyleKeys.contains(key) else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let cooldown: TimeInterval = AccessibilityBridge.hasScreenRecordingPermission() ? 1.5 : 4.0
+        if let failedAt = failedStyleSampleTimes[key], (now - failedAt) < cooldown {
+            return
+        }
+
+        pendingStyleKeys.insert(key)
+        Task { @MainActor [weak self] in
+            let sampled = await AccessibilityBridge.sampleTitlebarStyle(
+                windowID: windowID,
+                windowAXFrame: windowAXFrame,
+                buttonUnionAXRect: buttonUnionAXRect
+            )
+            guard let self else { return }
+            self.pendingStyleKeys.remove(key)
+            if let sampled {
+                self.failedStyleSampleTimes.removeValue(forKey: key)
+                self.sampledTitlebarStyles[key] = sampled
+                if isActive {
+                    if let cur = self.currentWindow, cur.pid == pid, cur.windowID == windowID {
+                        self.trafficLightMaskView?.applyStyle(sampled)
+                    }
+                } else {
+                    self.backgroundMasks[windowID]?.view.applyStyle(sampled)
+                }
+            } else {
+                self.failedStyleSampleTimes[key] = ProcessInfo.processInfo.systemUptime
+            }
+        }
+    }
+
     private func defaultMaskFallbackColor() -> NSColor {
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         return isDark
             ? NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0)
             : NSColor(srgbRed: 0.925, green: 0.925, blue: 0.925, alpha: 1.0)
+    }
+
+    private func defaultMaskStyleFallback() -> SampledTitlebarStyle {
+        let c = defaultMaskFallbackColor()
+        return SampledTitlebarStyle(
+            topColor: c,
+            midColor: c,
+            bottomColor: c,
+            cornerColor: c
+        )
     }
 
     // MARK: - Window Actions (delegated to WindowSnapManager)
@@ -1653,6 +1838,7 @@ public final class WindowChromeBarController: NSObject {
             (1 << CGEventType.leftMouseDown.rawValue)
                 | (1 << CGEventType.leftMouseDragged.rawValue)
                 | (1 << CGEventType.leftMouseUp.rawValue)
+                | (1 << CGEventType.mouseMoved.rawValue)
         )
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
@@ -1685,6 +1871,7 @@ public final class WindowChromeBarController: NSObject {
         dragSnapshotTimeoutWork = nil
         dragGhostPanel?.orderOut(nil)
         cornerSkirtPanel?.orderOut(nil)
+        hideResizeCursor()
         restoreHiddenDragAppIfNeeded()
         fastDragSyncTimer?.invalidate()
         fastDragSyncTimer = nil
@@ -1697,7 +1884,7 @@ public final class WindowChromeBarController: NSObject {
         mouseDragTap = nil
         mouseDragRunLoopSource = nil
         isDraggingTargetWindow = false
-        activeBarResize = nil
+        activeWindowResize = nil
         setInteractionActive(false)
         isExternalMouseDragging = false
         isBlockingNativeTitlebarDrag = false
@@ -1711,8 +1898,16 @@ public final class WindowChromeBarController: NSObject {
     }
 
     private func prewarmSnapshotForCurrentWindow(force: Bool, maxAge: TimeInterval = 0.6) {
+        let activeTargetWin: AXWindowInfo?
+        if isDraggingTargetWindow {
+            activeTargetWin = dragTargetWindow
+        } else if let resizeWin = activeWindowResize?.window {
+            activeTargetWin = resizeWin
+        } else {
+            activeTargetWin = currentWindow
+        }
         guard !isFinishingDragDrop,
-              let win = isDraggingTargetWindow ? dragTargetWindow : currentWindow,
+              let win = activeTargetWin,
               win.windowID != 0
         else {
             return
@@ -1759,11 +1954,24 @@ public final class WindowChromeBarController: NSObject {
                     self.dragSnapshotTimeoutWork = nil
                     self.startVisualGhostDrag(for: activeWin)
                 }
+            } else if var resize = self.activeWindowResize,
+                      resize.window.windowID == wid {
+                if let image {
+                    self.dragGhostState.snapshot = image
+                    self.dragGhostState.snapshotOriginalSize = frame.size
+                }
+                if resize.waitingForSnapshot && !resize.didStartVisualGhost {
+                    resize.waitingForSnapshot = false
+                    self.activeWindowResize = resize
+                    self.dragSnapshotTimeoutWork?.cancel()
+                    self.dragSnapshotTimeoutWork = nil
+                    self.startVisualGhostResize(for: resize.window, targetAXFrame: resize.currentTargetFrameAX)
+                }
             }
         }
     }
 
-    private func hideRealWindowForActiveDrag(pid: pid_t, windowID: CGWindowID) {
+    private func hideRealWindowForActiveDrag(pid: pid_t, windowID: CGWindowID, windowAXFrame: CGRect) {
         guard hiddenDragAppPID == nil,
               pid != ProcessInfo.processInfo.processIdentifier
         else {
@@ -1792,14 +2000,13 @@ public final class WindowChromeBarController: NSObject {
         }
 
         let barH = CGFloat(model.config.windowBarHeight)
-        let ghostWindowAX = CGRect(origin: dragGhostCurrentWindowOriginAX, size: dragGhostWindowSizeAX)
         let ghostBarAX = CGRect(
-            x: dragGhostCurrentWindowOriginAX.x,
-            y: dragGhostCurrentWindowOriginAX.y - barH,
-            width: dragGhostWindowSizeAX.width,
+            x: windowAXFrame.minX,
+            y: windowAXFrame.minY - barH,
+            width: windowAXFrame.width,
             height: barH
         )
-        updateBackgroundMaskOcclusionInMemory(draggedWindowAXFrame: ghostWindowAX, draggedBarAXRect: ghostBarAX)
+        updateBackgroundMaskOcclusionInMemory(draggedWindowAXFrame: windowAXFrame, draggedBarAXRect: ghostBarAX)
     }
 
     private func restoreHiddenDragAppIfNeeded() {
@@ -1834,18 +2041,143 @@ public final class WindowChromeBarController: NSObject {
 
         let swallow = MainActor.assumeIsolated { () -> Bool in
             switch type {
+            case .mouseMoved:
+                handleTapMouseMoved(locationAX: locationAX)
+                return false
             case .leftMouseDown:
                 return handleTapMouseDown(locationAX: locationAX, clickCount: clickCount)
             case .leftMouseDragged:
                 return handleTapMouseDragged(locationAX: locationAX)
             case .leftMouseUp:
-                return handleTapMouseUp()
+                return handleTapMouseUp(locationAX: locationAX)
             default:
                 return false
             }
         }
 
         return swallow ? nil : Unmanaged.passUnretained(event)
+    }
+
+    private func ensureResizeCursorPanel() -> NonActivatingFloatingPanel {
+        if let existing = resizeCursorPanel {
+            return existing
+        }
+        let p = NonActivatingFloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 24, height: 28),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.allowsNotchAreaPlacement = true
+        p.level = Self.maximumCursorLevel
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.hasShadow = false
+        p.ignoresMouseEvents = true
+        p.minSize = .zero
+
+        let view = ResizeCursorOverlayView(frame: NSRect(x: 0, y: 0, width: 24, height: 28))
+        p.contentView = view
+        resizeCursorView = view
+        resizeCursorPanel = p
+        return p
+    }
+
+    private func hideResizeCursor() {
+        currentHoverResizeEdge = nil
+        resizeCursorPanel?.orderOut(nil)
+    }
+
+    private func updateResizeCursorPanel(
+        for edge: WindowChromeGeometry.WindowResizeEdge?,
+        mouseAX: CGPoint,
+        primaryScreenHeight: CGFloat
+    ) {
+        guard let edge else {
+            hideResizeCursor()
+            return
+        }
+
+        let cursor = ChromeBarHostingView<WindowChromeBarView>.cursor(for: edge)
+        let image = cursor.image
+        let imageSize = image.size
+        guard imageSize.width > 0, imageSize.height > 0 else {
+            hideResizeCursor()
+            return
+        }
+
+        let hotSpot = cursor.hotSpot
+        let mouseCocoaY = primaryScreenHeight - mouseAX.y
+        let targetRect = CGRect(
+            x: (mouseAX.x - hotSpot.x).rounded(),
+            y: (mouseCocoaY - (imageSize.height - hotSpot.y)).rounded(),
+            width: imageSize.width,
+            height: imageSize.height
+        )
+
+        let cursorPanel = ensureResizeCursorPanel()
+        if cursorPanel.level != Self.maximumCursorLevel {
+            cursorPanel.level = Self.maximumCursorLevel
+        }
+        if currentHoverResizeEdge != edge {
+            currentHoverResizeEdge = edge
+            resizeCursorView?.cursorImage = image
+        }
+        resizeCursorView?.frame = NSRect(origin: .zero, size: imageSize)
+        setPanelFrameFast(cursorPanel, to: targetRect)
+        if !cursorPanel.isVisible {
+            cursorPanel.displayIfNeeded()
+            cursorPanel.orderFrontRegardless()
+        }
+    }
+
+    private func handleTapMouseMoved(locationAX: CGPoint) {
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        if let resize = activeWindowResize {
+            updateResizeCursorPanel(for: resize.edge, mouseAX: locationAX, primaryScreenHeight: primaryH)
+            return
+        }
+
+        guard !isDraggingTargetWindow,
+              !isFinishingDragDrop,
+              model.config.showWindowChromeBar,
+              !state.isNotchDocked,
+              !state.isMaximized,
+              let win = currentWindow,
+              let panel,
+              panel.isVisible,
+              let front = NSWorkspace.shared.frontmostApplication,
+              front.processIdentifier == win.pid,
+              let bid = front.bundleIdentifier,
+              bid != "com.apple.finder",
+              !model.config.windowBarExcludedBundleIDs.contains(bid)
+        else {
+            hideResizeCursor()
+            return
+        }
+
+        let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
+        if snapPanel?.isVisible == true, snapPanel?.frame.contains(cocoaPt) == true {
+            hideResizeCursor()
+            return
+        }
+
+        let barCocoa = logicalBarFrameCocoa.width > 0 ? logicalBarFrameCocoa : panel.frame
+        let barAX = WindowChromeGeometry.cocoaRectToAX(barCocoa, primaryScreenHeight: primaryH)
+        let combinedAX = WindowChromeGeometry.combinedWindowAndBarAXFrame(windowAXFrame: win.axFrame, barAXFrame: barAX)
+        let edge = WindowChromeGeometry.windowResizeEdge(
+            atAXPoint: locationAX,
+            combinedFrameAX: combinedAX,
+            borderThickness: 6,
+            outset: 2,
+            cornerSize: 14,
+            isTopClipped: false,
+            isLeftClipped: state.isLeftEdgeClipped,
+            isRightClipped: state.isRightEdgeClipped,
+            isBottomClipped: false
+        )
+        updateResizeCursorPanel(for: edge, mouseAX: locationAX, primaryScreenHeight: primaryH)
     }
 
     private func isPointInDragZone(_ cocoaPt: NSPoint) -> Bool {
@@ -1985,58 +2317,140 @@ public final class WindowChromeBarController: NSObject {
 
         let primaryH = AccessibilityBridge.primaryScreenHeight()
         let cocoaPt = NSPoint(x: locationAX.x, y: primaryH - locationAX.y)
+        let hittingSnapPanel = snapPanel?.isVisible == true && snapPanel?.frame.contains(cocoaPt) == true
 
-        // 1. Clicks inside our chrome bar (logical bar frame, 0pt overlap with app content)
-        let activeBarHitRect = logicalBarFrameCocoa.width > 0 ? logicalBarFrameCocoa : (panel?.frame ?? .zero)
-        if let panel, panel.isVisible, activeBarHitRect.contains(cocoaPt) {
-            // Check outer resize borders & corners first for floating bars
-            if !state.isNotchDocked,
-               !state.isMaximized,
-               let win = currentWindow {
-                let localTopLeft = CGPoint(
-                    x: cocoaPt.x - activeBarHitRect.minX,
-                    y: activeBarHitRect.maxY - cocoaPt.y
+        // 0. 8-edge window resize across [bar ∪ window] BEFORE bar drag, NativeDragGuard, and external drag sync.
+        if !hittingSnapPanel,
+           !state.isNotchDocked,
+           !state.isMaximized,
+           let panel,
+           panel.isVisible,
+           let win = currentWindow,
+           let front = NSWorkspace.shared.frontmostApplication,
+           front.processIdentifier == win.pid,
+           let bid = front.bundleIdentifier,
+           bid != "com.apple.finder",
+           !model.config.windowBarExcludedBundleIDs.contains(bid) {
+            let cachedBarCocoa = logicalBarFrameCocoa.width > 0 ? logicalBarFrameCocoa : panel.frame
+            let cachedBarAX = WindowChromeGeometry.cocoaRectToAX(cachedBarCocoa, primaryScreenHeight: primaryH)
+            let cachedCombinedAX = WindowChromeGeometry.combinedWindowAndBarAXFrame(
+                windowAXFrame: win.axFrame,
+                barAXFrame: cachedBarAX
+            )
+            let approxOuterEdge = WindowChromeGeometry.windowResizeEdge(
+                atAXPoint: locationAX,
+                combinedFrameAX: cachedCombinedAX,
+                borderThickness: 12,
+                outset: 8,
+                cornerSize: 20,
+                isTopClipped: false,
+                isLeftClipped: state.isLeftEdgeClipped,
+                isRightClipped: state.isRightEdgeClipped,
+                isBottomClipped: false
+            )
+            let nearNativeTopBand = locationAX.x >= win.axFrame.minX - 6
+                && locationAX.x <= win.axFrame.maxX + 6
+                && locationAX.y >= win.axFrame.minY - 6
+                && locationAX.y <= win.axFrame.minY + 10
+
+            if approxOuterEdge != nil || nearNativeTopBand {
+                let fastFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID) ?? win.axFrame
+                let liveScreen = AccessibilityBridge.screenContaining(axFrame: fastFrame)
+                    ?? NSScreen.main
+                    ?? NSScreen.screens.first
+                let barH = CGFloat(model.config.windowBarHeight)
+                let liveLayout = liveScreen.flatMap {
+                    WindowChromeGeometry.dockedBarLayout(
+                        forAXWindowFrame: fastFrame,
+                        primaryScreenHeight: primaryH,
+                        screenFrameCocoa: $0.frame,
+                        visibleFrameCocoa: $0.visibleFrame,
+                        safeAreaTopInset: $0.safeAreaInsets.top,
+                        auxiliaryTopLeftWidth: $0.auxiliaryTopLeftArea?.width ?? 0,
+                        auxiliaryTopRightWidth: $0.auxiliaryTopRightArea?.width ?? 0,
+                        barHeight: barH,
+                        taskbarHeight: CGFloat(model.config.taskbarHeight)
+                    )
+                }
+                let liveBarCocoa = liveLayout?.frameCocoa ?? cachedBarCocoa
+                let liveBarAX = WindowChromeGeometry.cocoaRectToAX(liveBarCocoa, primaryScreenHeight: primaryH)
+                let liveWindowCocoa = WindowChromeGeometry.axRectToCocoa(fastFrame, primaryScreenHeight: primaryH)
+                let liveLeftClipped = liveWindowCocoa.minX < liveBarCocoa.minX - 1.0
+                let liveRightClipped = liveWindowCocoa.maxX > liveBarCocoa.maxX + 1.0
+                let liveCombinedAX = WindowChromeGeometry.combinedWindowAndBarAXFrame(
+                    windowAXFrame: fastFrame,
+                    barAXFrame: liveBarAX
                 )
-                if let edge = WindowChromeGeometry.chromeBarResizeEdge(
-                    atLocalPoint: localTopLeft,
-                    barSize: activeBarHitRect.size,
-                    isTopClipped: false,
-                    isLeftClipped: state.isLeftEdgeClipped,
-                    isRightClipped: state.isRightEdgeClipped
-                ) {
-                    let fastFrame = AccessibilityBridge.liveWindowBounds(windowID: win.windowID) ?? win.axFrame
-                    let screen = AccessibilityBridge.screenContaining(axFrame: fastFrame)
-                        ?? NSScreen.main
-                        ?? NSScreen.screens.first
-                    let barH = CGFloat(model.config.windowBarHeight)
-                    let screenTopAX = screen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
-                    let minWindowTopAX = screenTopAX + barH
 
-                    activeBarResize = ActiveBarResize(
-                        window: AXWindowInfo(
-                            pid: win.pid,
-                            windowID: win.windowID,
-                            title: win.title,
-                            axFrame: fastFrame,
-                            isMinimized: win.isMinimized,
-                            isFullScreen: win.isFullScreen,
-                            element: win.element
-                        ),
+                var detectedEdge = WindowChromeGeometry.windowResizeEdge(
+                    atAXPoint: locationAX,
+                    combinedFrameAX: liveCombinedAX,
+                    borderThickness: 6,
+                    outset: 2,
+                    cornerSize: 14,
+                    isTopClipped: false,
+                    isLeftClipped: liveLeftClipped,
+                    isRightClipped: liveRightClipped,
+                    isBottomClipped: false
+                )
+                if detectedEdge == nil,
+                   locationAX.x >= fastFrame.minX,
+                   locationAX.x <= fastFrame.maxX,
+                   locationAX.y >= fastFrame.minY - 1,
+                   locationAX.y <= fastFrame.minY + 4 {
+                    detectedEdge = .top
+                }
+
+                if let edge = detectedEdge {
+                    let screenTopAX = liveScreen.map { primaryH - min($0.visibleFrame.maxY, $0.frame.maxY) } ?? 0
+                    let minWindowTopAX = screenTopAX + barH
+                    let maxWindowBottomAX: CGFloat? = !model.config.taskbarAutoHide
+                        ? liveScreen.map { primaryH - ($0.frame.minY + CGFloat(model.config.taskbarHeight)) }
+                        : nil
+
+                    dragSnapshotTimeoutWork?.cancel()
+                    dragSnapshotTimeoutWork = nil
+                    dragGeneration &+= 1
+
+                    let liveWin = AXWindowInfo(
+                        pid: win.pid,
+                        windowID: win.windowID,
+                        title: win.title,
+                        axFrame: fastFrame,
+                        isMinimized: win.isMinimized,
+                        isFullScreen: win.isFullScreen,
+                        element: win.element
+                    )
+                    activeWindowResize = ActiveWindowResize(
+                        window: liveWin,
+                        bundleID: bid,
                         edge: edge,
                         startMouseAX: locationAX,
                         startWindowFrameAX: fastFrame,
                         minWindowTopAX: minWindowTopAX,
-                        lastAppliedFrameAX: fastFrame,
-                        lastApplyTimestamp: 0
+                        maxWindowBottomAX: maxWindowBottomAX,
+                        currentTargetFrameAX: fastFrame,
+                        didCrossThreshold: false,
+                        didStartVisualGhost: false,
+                        waitingForSnapshot: false,
+                        lastVisualUpdateTimestamp: 0,
+                        lastGhostMenuWidth: fastFrame.width,
+                        generation: dragGeneration
                     )
                     ChromeBarHostingView<WindowChromeBarView>.cursor(for: edge).set()
+                    updateResizeCursorPanel(for: edge, mouseAX: locationAX, primaryScreenHeight: primaryH)
                     snapManager.suppressGlobalDragMonitor = true
                     snapPanel?.orderOut(nil)
                     setInteractionActive(true)
+                    prewarmSnapshotForCurrentWindow(force: false, maxAge: 0.25)
                     return true
                 }
             }
+        }
 
+        // 1. Clicks inside our chrome bar (logical bar frame, 0pt overlap with app content)
+        let activeBarHitRect = logicalBarFrameCocoa.width > 0 ? logicalBarFrameCocoa : (panel?.frame ?? .zero)
+        if let panel, panel.isVisible, activeBarHitRect.contains(cocoaPt) {
             if let win = currentWindow,
                isPointInDragZone(cocoaPt) {
                 if clickCount == 2 {
@@ -2078,6 +2492,7 @@ public final class WindowChromeBarController: NSObject {
                 )
                 dragMinSafeAXTop = screenTopAX + topSafeReserve
                 isDraggingTargetWindow = true
+                hideResizeCursor()
                 setInteractionActive(true)
                 snapManager.suppressGlobalDragMonitor = true
                 snapPanel?.orderOut(nil)
@@ -2147,6 +2562,8 @@ public final class WindowChromeBarController: NSObject {
             win !== panel
                 && win !== cornerSkirtPanel
                 && win !== trafficLightMaskPanel
+                && win !== resizeCursorPanel
+                && win !== dragGhostPanel
                 && !backgroundMasks.values.contains(where: { $0.panel === win })
                 && win.isVisible
                 && !win.ignoresMouseEvents
@@ -2220,6 +2637,39 @@ public final class WindowChromeBarController: NSObject {
         return false
     }
 
+    private func populateDragGhostMetadata(
+        windowWidth: CGFloat,
+        windowID: CGWindowID,
+        pid: pid_t,
+        bundleID: String
+    ) {
+        let barH = CGFloat(model.config.windowBarHeight)
+        dragGhostState.appIcon = state.appIcon
+        dragGhostState.title = state.windowTitle
+        updateDragGhostMenus(forBarWidth: windowWidth)
+        dragGhostState.barHeight = barH
+
+        if bundleID != model.config.fileExplorerBundleID {
+            dragGhostState.trafficLightMaskRectLocal = cachedMaskRelativeOffsets[windowID]
+            dragGhostState.trafficLightMaskStyle = sampledTitlebarStyles[styleKey(pid: pid, windowID: windowID, isActive: true)]
+                ?? sampledTitlebarStyles[styleKey(pid: pid, windowID: windowID, isActive: false)]
+                ?? defaultMaskStyleFallback()
+        } else {
+            dragGhostState.trafficLightMaskRectLocal = nil
+            dragGhostState.trafficLightMaskStyle = nil
+        }
+    }
+
+    private func updateDragGhostMenus(forBarWidth barWidth: CGFloat) {
+        let ghostVisibleMenus = WindowChromeGeometry.visibleMenuCount(
+            forMenuTitles: state.menuItems.map(\.title),
+            barWidth: barWidth,
+            maxVisibleMenus: 7
+        )
+        dragGhostState.menuTitles = Array(state.menuItems.prefix(ghostVisibleMenus).map(\.title))
+        dragGhostState.hasOverflowMenus = state.menuItems.count > ghostVisibleMenus
+    }
+
     private func startVisualGhostDrag(for win: AXWindowInfo) {
         guard isDraggingTargetWindow, !dragDidStartVisualGhost else { return }
         dragDidStartVisualGhost = true
@@ -2255,7 +2705,56 @@ public final class WindowChromeBarController: NSObject {
             self.panel?.orderOut(nil)
             self.cornerSkirtPanel?.orderOut(nil)
             self.trafficLightMaskPanel?.orderOut(nil)
-            self.hideRealWindowForActiveDrag(pid: pid, windowID: wid)
+            self.hideRealWindowForActiveDrag(
+                pid: pid,
+                windowID: wid,
+                windowAXFrame: CGRect(origin: self.dragGhostCurrentWindowOriginAX, size: self.dragGhostWindowSizeAX)
+            )
+        }
+    }
+
+    private func startVisualGhostResize(for win: AXWindowInfo, targetAXFrame: CGRect) {
+        guard var resize = activeWindowResize, !resize.didStartVisualGhost else { return }
+        resize.didStartVisualGhost = true
+        resize.waitingForSnapshot = false
+        resize.lastVisualUpdateTimestamp = ProcessInfo.processInfo.systemUptime
+        activeWindowResize = resize
+        dragSnapshotTimeoutWork?.cancel()
+        dragSnapshotTimeoutWork = nil
+
+        let barH = CGFloat(model.config.windowBarHeight)
+        let primaryH = AccessibilityBridge.primaryScreenHeight()
+        let ghostAXRect = CGRect(
+            x: targetAXFrame.minX,
+            y: targetAXFrame.minY - barH,
+            width: targetAXFrame.width,
+            height: targetAXFrame.height + barH
+        )
+        let ghostCocoaRect = WindowChromeGeometry.axRectToCocoa(ghostAXRect, primaryScreenHeight: primaryH)
+        let ghostPanel = ensureDragGhostPanel()
+        ghostPanel.setFrame(ghostCocoaRect, display: true)
+        ghostPanel.contentView?.layoutSubtreeIfNeeded()
+        ghostPanel.displayIfNeeded()
+        ghostPanel.orderFrontRegardless()
+
+        let pid = win.pid
+        let wid = win.windowID
+        let generation = resize.generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
+            guard let self,
+                  let activeResize = self.activeWindowResize,
+                  activeResize.didStartVisualGhost,
+                  activeResize.generation == generation,
+                  activeResize.window.windowID == wid
+            else { return }
+            self.panel?.orderOut(nil)
+            self.cornerSkirtPanel?.orderOut(nil)
+            self.trafficLightMaskPanel?.orderOut(nil)
+            self.hideRealWindowForActiveDrag(
+                pid: pid,
+                windowID: wid,
+                windowAXFrame: activeResize.currentTargetFrameAX
+            )
         }
     }
 
@@ -2304,7 +2803,8 @@ public final class WindowChromeBarController: NSObject {
             return false
         }
 
-        if var resize = activeBarResize {
+        if var resize = activeWindowResize {
+            let primaryH = AccessibilityBridge.primaryScreenHeight()
             let deltaAX = CGSize(
                 width: locationAX.x - resize.startMouseAX.x,
                 height: locationAX.y - resize.startMouseAX.y
@@ -2313,32 +2813,94 @@ public final class WindowChromeBarController: NSObject {
                 startWindowAXFrame: resize.startWindowFrameAX,
                 edge: resize.edge,
                 deltaAX: deltaAX,
-                minWindowTopAX: resize.minWindowTopAX
+                minWindowTopAX: resize.minWindowTopAX,
+                maxWindowBottomAX: resize.maxWindowBottomAX
             )
-            let diff = max(
-                abs(targetFrame.minX - resize.lastAppliedFrameAX.minX),
-                abs(targetFrame.minY - resize.lastAppliedFrameAX.minY),
-                abs(targetFrame.width - resize.lastAppliedFrameAX.width),
-                abs(targetFrame.height - resize.lastAppliedFrameAX.height)
-            )
-            let now = ProcessInfo.processInfo.systemUptime
-            if diff >= 1.0 && (now - resize.lastApplyTimestamp) >= (1.0 / 60.0) {
-                AccessibilityBridge.setFrame(resize.window.element, axFrame: targetFrame)
-                resize.lastAppliedFrameAX = targetFrame
-                resize.lastApplyTimestamp = now
-                activeBarResize = resize
+            resize.currentTargetFrameAX = targetFrame
 
-                let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: resize.window.windowID) ?? targetFrame
-                let primaryH = AccessibilityBridge.primaryScreenHeight()
-                if let barAXRect = applyOverlayFramesFast(
-                    forLiveBounds: liveBounds,
-                    windowID: resize.window.windowID,
-                    primaryScreenHeight: primaryH,
-                    includeBackgroundMasks: false
-                ) {
-                    updateBackgroundMaskOcclusionInMemory(draggedWindowAXFrame: liveBounds, draggedBarAXRect: barAXRect)
+            ChromeBarHostingView<WindowChromeBarView>.cursor(for: resize.edge).set()
+            updateResizeCursorPanel(for: resize.edge, mouseAX: locationAX, primaryScreenHeight: primaryH)
+
+            let barH = CGFloat(model.config.windowBarHeight)
+            if !resize.didStartVisualGhost {
+                guard hypot(deltaAX.width, deltaAX.height) >= 2 else {
+                    activeWindowResize = resize
+                    return true
                 }
+
+                if !resize.didCrossThreshold {
+                    resize.didCrossThreshold = true
+                    resize.lastGhostMenuWidth = targetFrame.width
+                    populateDragGhostMetadata(
+                        windowWidth: targetFrame.width,
+                        windowID: resize.window.windowID,
+                        pid: resize.window.pid,
+                        bundleID: resize.bundleID
+                    )
+                }
+
+                if let cached = cachedDragSnapshot,
+                   cached.windowID == resize.window.windowID,
+                   abs(cached.size.width - resize.startWindowFrameAX.width) < 4,
+                   abs(cached.size.height - resize.startWindowFrameAX.height) < 4 {
+                    dragGhostState.snapshot = cached.image
+                    dragGhostState.snapshotOriginalSize = cached.size
+                    activeWindowResize = resize
+                    startVisualGhostResize(for: resize.window, targetAXFrame: targetFrame)
+                } else if !resize.waitingForSnapshot {
+                    resize.waitingForSnapshot = true
+                    dragGhostState.snapshot = nil
+                    dragGhostState.snapshotOriginalSize = resize.startWindowFrameAX.size
+                    activeWindowResize = resize
+                    prewarmSnapshotForCurrentWindow(force: true)
+
+                    dragSnapshotTimeoutWork?.cancel()
+                    let wid = resize.window.windowID
+                    let generation = resize.generation
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self,
+                              var currentResize = self.activeWindowResize,
+                              currentResize.waitingForSnapshot,
+                              !currentResize.didStartVisualGhost,
+                              currentResize.generation == generation,
+                              currentResize.window.windowID == wid
+                        else { return }
+                        currentResize.waitingForSnapshot = false
+                        self.activeWindowResize = currentResize
+                        self.dragSnapshotTimeoutWork = nil
+                        self.startVisualGhostResize(for: currentResize.window, targetAXFrame: currentResize.currentTargetFrameAX)
+                    }
+                    dragSnapshotTimeoutWork = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.045, execute: work)
+                } else {
+                    activeWindowResize = resize
+                }
+                return true
             }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            if (now - resize.lastVisualUpdateTimestamp) >= (1.0 / 120.0) {
+                resize.lastVisualUpdateTimestamp = now
+                if abs(targetFrame.width - resize.lastGhostMenuWidth) >= 8 {
+                    resize.lastGhostMenuWidth = targetFrame.width
+                    updateDragGhostMenus(forBarWidth: targetFrame.width)
+                }
+                let ghostAXRect = CGRect(
+                    x: targetFrame.minX,
+                    y: targetFrame.minY - barH,
+                    width: targetFrame.width,
+                    height: targetFrame.height + barH
+                )
+                let ghostCocoaRect = WindowChromeGeometry.axRectToCocoa(ghostAXRect, primaryScreenHeight: primaryH)
+                if let ghostPanel = dragGhostPanel {
+                    setPanelFrameFast(ghostPanel, to: ghostCocoaRect)
+                }
+                updateBackgroundMaskOcclusionInMemory(
+                    draggedWindowAXFrame: targetFrame,
+                    draggedBarAXRect: CGRect(x: targetFrame.minX, y: targetFrame.minY - barH, width: targetFrame.width, height: barH)
+                )
+            }
+            activeWindowResize = resize
             return true
         }
 
@@ -2376,25 +2938,15 @@ public final class WindowChromeBarController: NSObject {
                     }
                 }
 
-                dragGhostState.appIcon = state.appIcon
-                dragGhostState.title = state.windowTitle
-                let ghostVisibleMenus = WindowChromeGeometry.visibleMenuCount(
-                    forMenuTitles: state.menuItems.map(\.title),
-                    barWidth: dragGhostWindowSizeAX.width,
-                    maxVisibleMenus: 7
+                let bid = currentBundleID.isEmpty
+                    ? (NSRunningApplication(processIdentifier: win.pid)?.bundleIdentifier ?? "")
+                    : currentBundleID
+                populateDragGhostMetadata(
+                    windowWidth: dragGhostWindowSizeAX.width,
+                    windowID: win.windowID,
+                    pid: win.pid,
+                    bundleID: bid
                 )
-                dragGhostState.menuTitles = Array(state.menuItems.prefix(ghostVisibleMenus).map(\.title))
-                dragGhostState.hasOverflowMenus = state.menuItems.count > ghostVisibleMenus
-                dragGhostState.barHeight = barH
-
-                if currentBundleID != model.config.fileExplorerBundleID {
-                    dragGhostState.trafficLightMaskRectLocal = cachedMaskRelativeOffsets[win.windowID]
-                    dragGhostState.trafficLightMaskColor = sampledMaskColors["\(win.pid)-\(win.windowID)"]
-                        ?? defaultMaskFallbackColor()
-                } else {
-                    dragGhostState.trafficLightMaskRectLocal = nil
-                    dragGhostState.trafficLightMaskColor = nil
-                }
             }
 
             let targetWinX = (locationAX.x - dragGhostGrabOffsetAX.x).rounded()
@@ -2466,21 +3018,22 @@ public final class WindowChromeBarController: NSObject {
         return true
     }
 
-    private func handleTapMouseUp() -> Bool {
+    private func handleTapMouseUp(locationAX: CGPoint) -> Bool {
         nativeDragGuard = nil
         if isBlockingNativeTitlebarDrag {
             isBlockingNativeTitlebarDrag = false
             return true
         }
 
-        if let resize = activeBarResize {
-            activeBarResize = nil
+        if let resize = activeWindowResize {
+            dragSnapshotTimeoutWork?.cancel()
+            dragSnapshotTimeoutWork = nil
+            activeWindowResize = nil
             snapManager.suppressGlobalDragMonitor = false
+            hideResizeCursor()
             NSCursor.arrow.set()
 
             let primaryH = AccessibilityBridge.primaryScreenHeight()
-            let mouseCocoa = NSEvent.mouseLocation
-            let locationAX = CGPoint(x: mouseCocoa.x, y: primaryH - mouseCocoa.y)
             let deltaAX = CGSize(
                 width: locationAX.x - resize.startMouseAX.x,
                 height: locationAX.y - resize.startMouseAX.y
@@ -2489,19 +3042,136 @@ public final class WindowChromeBarController: NSObject {
                 startWindowAXFrame: resize.startWindowFrameAX,
                 edge: resize.edge,
                 deltaAX: deltaAX,
-                minWindowTopAX: resize.minWindowTopAX
+                minWindowTopAX: resize.minWindowTopAX,
+                maxWindowBottomAX: resize.maxWindowBottomAX
             )
-            AccessibilityBridge.setFrame(resize.window.element, axFrame: finalFrame)
-            let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: resize.window.windowID) ?? finalFrame
-            _ = applyOverlayFramesFast(
-                forLiveBounds: liveBounds,
-                windowID: resize.window.windowID,
-                primaryScreenHeight: primaryH,
-                includeBackgroundMasks: false
+
+            if !resize.didStartVisualGhost {
+                dragGhostPanel?.orderOut(nil)
+                setInteractionActive(false)
+                restoreHiddenDragAppIfNeeded()
+                DispatchQueue.main.async { [weak self] in
+                    self?.syncActiveWindow()
+                }
+                return true
+            }
+
+            let barH = CGFloat(model.config.windowBarHeight)
+            let finalGhostAX = CGRect(
+                x: finalFrame.minX,
+                y: finalFrame.minY - barH,
+                width: finalFrame.width,
+                height: finalFrame.height + barH
             )
-            setInteractionActive(false)
+            if let ghostPanel = dragGhostPanel {
+                setPanelFrameFast(ghostPanel, to: WindowChromeGeometry.axRectToCocoa(finalGhostAX, primaryScreenHeight: primaryH))
+            }
+
+            cachedDragSnapshot = nil
+            isFinishingDragDrop = true
+            let dropGeneration = resize.generation
+            let hiddenPID = hiddenDragAppPID
+            let win = resize.window
+            let bid = resize.bundleID
+
             DispatchQueue.main.async { [weak self] in
-                self?.syncActiveWindow()
+                guard let self else { return }
+
+                self.snapManager.clearSavedRestoreFrame(for: win, bundleID: bid)
+
+                let targetPID = hiddenPID ?? win.pid
+                if self.hiddenDragAppPID == targetPID {
+                    self.hiddenDragAppPID = nil
+                }
+                let appEl = AXUIElementCreateApplication(targetPID)
+                AXUIElementSetMessagingTimeout(appEl, 0.12)
+                AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
+                AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                if let app = NSRunningApplication(processIdentifier: targetPID) {
+                    app.unhide()
+                    app.activate(options: [.activateAllWindows])
+                }
+
+                AccessibilityBridge.setFrame(win.element, axFrame: finalFrame)
+                AccessibilityBridge.focusWindow(win)
+
+                var didHideGhost = false
+                var lastObservedBounds: CGRect?
+                var retryCount = 0
+
+                let finishResizeDrop: () -> Void = { [weak self] in
+                    guard let self, self.dragGeneration == dropGeneration, !didHideGhost else { return }
+                    didHideGhost = true
+                    self.dragGhostPanel?.orderOut(nil)
+                    self.isFinishingDragDrop = false
+                    self.setInteractionActive(false)
+                    self.syncActiveWindow()
+                    self.panel?.displayIfNeeded()
+                    self.cornerSkirtPanel?.displayIfNeeded()
+                    self.trafficLightMaskPanel?.displayIfNeeded()
+                    let curPrimaryH = AccessibilityBridge.primaryScreenHeight()
+                    let curMouseCocoa = NSEvent.mouseLocation
+                    self.handleTapMouseMoved(locationAX: CGPoint(x: curMouseCocoa.x, y: curPrimaryH - curMouseCocoa.y))
+                }
+
+                let reapplyIfNeeded: () -> Bool = {
+                    let app = NSRunningApplication(processIdentifier: win.pid)
+                    let liveBounds = AccessibilityBridge.liveWindowBounds(windowID: win.windowID)
+                    if app?.isHidden == true || liveBounds == nil {
+                        let appEl = AXUIElementCreateApplication(win.pid)
+                        AXUIElementSetMessagingTimeout(appEl, 0.12)
+                        AXUIElementSetAttributeValue(appEl, kAXHiddenAttribute as CFString, kCFBooleanFalse)
+                        AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                        app?.unhide()
+                        app?.activate(options: [.activateAllWindows])
+                        AccessibilityBridge.setFrame(win.element, axFrame: finalFrame)
+                        AccessibilityBridge.focusWindow(win)
+                        return false
+                    }
+
+                    guard let liveBounds else { return false }
+                    let originDiff = hypot(liveBounds.minX - finalFrame.minX, liveBounds.minY - finalFrame.minY)
+                    let sizeDiff = max(
+                        abs(liveBounds.width - finalFrame.width),
+                        abs(liveBounds.height - finalFrame.height)
+                    )
+                    if originDiff <= 2 && sizeDiff <= 2 {
+                        return true
+                    }
+                    if retryCount >= 1,
+                       let prev = lastObservedBounds,
+                       abs(prev.minX - liveBounds.minX) < 0.5,
+                       abs(prev.minY - liveBounds.minY) < 0.5,
+                       abs(prev.width - liveBounds.width) < 0.5,
+                       abs(prev.height - liveBounds.height) < 0.5,
+                       originDiff <= 8,
+                       sizeDiff <= 16 {
+                        return true
+                    }
+
+                    lastObservedBounds = liveBounds
+                    retryCount += 1
+                    if retryCount <= 1 {
+                        AccessibilityBridge.setFrameFast(win.element, axFrame: finalFrame)
+                    } else {
+                        AccessibilityBridge.setFrame(win.element, axFrame: finalFrame)
+                    }
+                    AccessibilityBridge.focusWindow(win)
+                    return false
+                }
+
+                for delay in [0.025, 0.070, 0.140, 0.240] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        guard let self, self.dragGeneration == dropGeneration, !didHideGhost else { return }
+                        if reapplyIfNeeded() {
+                            finishResizeDrop()
+                        }
+                    }
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.260) {
+                    finishResizeDrop()
+                }
             }
             return true
         }
@@ -2512,6 +3182,12 @@ public final class WindowChromeBarController: NSObject {
             fastDragSyncTimer = nil
             DispatchQueue.main.async { [weak self] in
                 self?.syncActiveWindow()
+            }
+            for delay in [0.025, 0.080] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.syncOverlayPositionsFromWindowServer()
+                    self?.syncActiveWindow()
+                }
             }
         }
 
@@ -2663,7 +3339,7 @@ public final class WindowChromeBarController: NSObject {
 
     private func startFastDragSyncTimer() {
         fastDragSyncTimer?.invalidate()
-        fastDragSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 45.0, repeats: true) { [weak self] _ in
+        fastDragSyncTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isExternalMouseDragging else { return }
                 self.syncOverlayPositionsFromWindowServer()
@@ -3089,12 +3765,30 @@ private struct CornerSkirtOverlayView: View {
     let state: CornerSkirtState
 
     var body: some View {
+        let roundLeft = !state.isLeftEdgeClipped
+        let roundRight = !state.isRightEdgeClipped
         let shape = CornerSkirtCutoutShape(
             innerCornerRadius: ChromeBarAppearance.windowInnerCornerRadius,
-            roundTopLeft: !state.isLeftEdgeClipped,
-            roundTopRight: !state.isRightEdgeClipped
+            topRimOverlap: ChromeBarAppearance.topRimOverlap,
+            edgeRimInset: ChromeBarAppearance.edgeRimInset,
+            roundTopLeft: roundLeft,
+            roundTopRight: roundRight
         )
         ChromeBarAppearance.fillColor
+            .overlay(alignment: .leading) {
+                if roundLeft {
+                    Rectangle()
+                        .fill(ChromeBarAppearance.outerBorderColor)
+                        .frame(width: 0.75)
+                }
+            }
+            .overlay(alignment: .trailing) {
+                if roundRight {
+                    Rectangle()
+                        .fill(ChromeBarAppearance.outerBorderColor)
+                        .frame(width: 0.75)
+                }
+            }
             .clipShape(shape)
             .allowsHitTesting(false)
     }
@@ -3105,44 +3799,57 @@ private struct BackgroundChromeBarView: View {
 
     var body: some View {
         let barHeight = state.barHeight
+        let skirtHeight = state.isNotchDocked ? 0 : state.cornerSkirtHeight
         let topRadius: CGFloat = (state.isNotchDocked || state.isMaximized) ? 0 : ChromeBarAppearance.floatingTopCornerRadius
         let roundLeft = !state.isLeftEdgeClipped
         let roundRight = !state.isRightEdgeClipped
         let maskShape = OccludedBarMaskShape(
-            topLeadingRadius: roundLeft ? topRadius : 0,
-            topTrailingRadius: roundRight ? topRadius : 0,
+            barHeight: barHeight,
+            topCornerRadius: topRadius,
+            innerCornerRadius: ChromeBarAppearance.windowInnerCornerRadius,
+            skirtHeight: skirtHeight,
+            roundTopLeft: roundLeft,
+            roundTopRight: roundRight,
             occludedLocalRects: state.occludedLocalRects
         )
 
-        HStack(spacing: 0) {
-            HStack(spacing: 6) {
-                if let icon = state.appIcon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 14, height: 14)
-                        .padding(.leading, 8)
-                }
-
-                Spacer(minLength: 8)
-
-                Text(state.windowTitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(ChromeBarAppearance.inactiveTitleForeground)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                Spacer(minLength: 8)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+        VStack(spacing: 0) {
             HStack(spacing: 0) {
-                inactiveGlyph("minus", height: barHeight)
-                inactiveGlyph(state.isMaximized ? "square.on.square" : "square", height: barHeight)
-                inactiveGlyph("xmark", height: barHeight)
+                HStack(spacing: 6) {
+                    if let icon = state.appIcon {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .frame(width: 14, height: 14)
+                            .padding(.leading, 8)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Text(state.windowTitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(ChromeBarAppearance.inactiveTitleForeground)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                HStack(spacing: 0) {
+                    inactiveGlyph("minus", height: barHeight)
+                    inactiveGlyph(state.isMaximized ? "square.on.square" : "square", height: barHeight)
+                    inactiveGlyph("xmark", height: barHeight)
+                }
+                .fixedSize(horizontal: true, vertical: false)
             }
-            .fixedSize(horizontal: true, vertical: false)
+            .frame(height: barHeight)
+
+            if skirtHeight > 0.5 {
+                Color.clear
+                    .frame(height: skirtHeight)
+            }
         }
-        .frame(height: barHeight)
+        .frame(height: barHeight + skirtHeight, alignment: .top)
         .background {
             if state.isNotchDocked {
                 ChromeBarAppearance.inactiveNotchFillColor
@@ -3150,11 +3857,12 @@ private struct BackgroundChromeBarView: View {
                 ChromeBarAppearance.inactiveFillColor
             }
         }
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .top) {
             if !state.isNotchDocked {
                 Rectangle()
                     .frame(height: 0.5)
                     .foregroundStyle(ChromeBarAppearance.bottomDividerColor)
+                    .offset(y: barHeight - 0.5)
                     .allowsHitTesting(false)
             }
         }
@@ -3192,7 +3900,9 @@ private struct DragGhostPreviewView: View {
             barHeight: barHeight,
             topCornerRadius: ChromeBarAppearance.floatingTopCornerRadius,
             innerCornerRadius: ChromeBarAppearance.windowInnerCornerRadius,
-            skirtHeight: skirtHeight
+            skirtHeight: skirtHeight,
+            topRimOverlap: ChromeBarAppearance.topRimOverlap,
+            edgeRimInset: ChromeBarAppearance.edgeRimInset
         )
 
         ZStack(alignment: .top) {
@@ -3210,9 +3920,19 @@ private struct DragGhostPreviewView: View {
                                 .frame(width: geo.size.width, height: geo.size.height)
 
                             if let relMask = state.trafficLightMaskRectLocal,
-                               let maskColor = state.trafficLightMaskColor {
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(Color(nsColor: maskColor))
+                               let maskStyle = state.trafficLightMaskStyle {
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                Color(nsColor: maskStyle.topColor),
+                                                Color(nsColor: maskStyle.midColor),
+                                                Color(nsColor: maskStyle.bottomColor)
+                                            ],
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        )
+                                    )
                                     .frame(
                                         width: max(1, relMask.width * sx),
                                         height: max(1, relMask.height * sy)
@@ -3518,12 +4238,39 @@ private final class TitleDragNSView: NSView {
     }
 }
 
-private final class TrafficLightMaskNSView: NSView {
-    var fillColor: NSColor = NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0) {
+private final class ResizeCursorOverlayView: NSView {
+    var cursorImage: NSImage? {
         didSet {
-            layer?.backgroundColor = fillColor.cgColor
+            if cursorImage !== oldValue {
+                needsDisplay = true
+            }
         }
     }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let cursorImage else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        cursorImage.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+private final class TrafficLightMaskNSView: NSView {
+    private let bottomFadeHostLayer = CALayer()
+    private let gradientLayer = CAGradientLayer()
+    private let rightFadeMaskLayer = CAGradientLayer()
+    private let bottomFadeMaskLayer = CAGradientLayer()
+
+    private var currentStyle = SampledTitlebarStyle(
+        topColor: NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0),
+        midColor: NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0),
+        bottomColor: NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0),
+        cornerColor: NSColor(srgbRed: 0.118, green: 0.118, blue: 0.122, alpha: 1.0)
+    )
+
     var onDragDelta: ((CGFloat, CGFloat) -> Void)?
     var onDragEnded: (() -> Void)?
     var onDoubleClick: (() -> Void)?
@@ -3532,12 +4279,78 @@ private final class TrafficLightMaskNSView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 5
+        layer?.cornerRadius = 4
         layer?.masksToBounds = true
-        layer?.backgroundColor = fillColor.cgColor
+
+        gradientLayer.locations = [0.0, 0.5, 1.0]
+        gradientLayer.startPoint = CGPoint(x: 0.5, y: 1.0)
+        gradientLayer.endPoint = CGPoint(x: 0.5, y: 0.0)
+
+        rightFadeMaskLayer.colors = [
+            NSColor.white.cgColor,
+            NSColor.white.cgColor,
+            NSColor.clear.cgColor
+        ]
+        rightFadeMaskLayer.startPoint = CGPoint(x: 0.0, y: 0.5)
+        rightFadeMaskLayer.endPoint = CGPoint(x: 1.0, y: 0.5)
+        gradientLayer.mask = rightFadeMaskLayer
+
+        bottomFadeMaskLayer.colors = [
+            NSColor.white.cgColor,
+            NSColor.white.cgColor,
+            NSColor.clear.cgColor
+        ]
+        bottomFadeMaskLayer.startPoint = CGPoint(x: 0.5, y: 1.0)
+        bottomFadeMaskLayer.endPoint = CGPoint(x: 0.5, y: 0.0)
+        bottomFadeHostLayer.mask = bottomFadeMaskLayer
+
+        bottomFadeHostLayer.addSublayer(gradientLayer)
+        layer?.addSublayer(bottomFadeHostLayer)
+
+        applyStyle(currentStyle)
+        updateLayerFrames()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func applyStyle(_ style: SampledTitlebarStyle) {
+        currentStyle = style
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradientLayer.colors = [
+            style.topColor.cgColor,
+            style.midColor.cgColor,
+            style.bottomColor.cgColor
+        ]
+        CATransaction.commit()
+    }
+
+    override func layout() {
+        super.layout()
+        updateLayerFrames()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateLayerFrames()
+    }
+
+    private func updateLayerFrames() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bottomFadeHostLayer.frame = bounds
+        gradientLayer.frame = bounds
+        rightFadeMaskLayer.frame = bounds
+        bottomFadeMaskLayer.frame = bounds
+
+        let w = max(1, bounds.width)
+        let h = max(1, bounds.height)
+        let rightStop = NSNumber(value: Double(max(0.0, min(1.0, (w - 3.0) / w))))
+        let bottomStop = NSNumber(value: Double(max(0.0, min(1.0, (h - 2.5) / h))))
+        rightFadeMaskLayer.locations = [0.0, rightStop, 1.0]
+        bottomFadeMaskLayer.locations = [0.0, bottomStop, 1.0]
+        CATransaction.commit()
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }

@@ -46,6 +46,26 @@ public struct OnScreenWindowSnapshot: Sendable {
     public let axBounds: CGRect
 }
 
+/// Vertical color bands and corner tint sampled from a window's native titlebar area.
+public struct SampledTitlebarStyle: @unchecked Sendable {
+    public let topColor: NSColor
+    public let midColor: NSColor
+    public let bottomColor: NSColor
+    public let cornerColor: NSColor
+
+    public init(
+        topColor: NSColor,
+        midColor: NSColor,
+        bottomColor: NSColor,
+        cornerColor: NSColor
+    ) {
+        self.topColor = topColor
+        self.midColor = midColor
+        self.bottomColor = bottomColor
+        self.cornerColor = cornerColor
+    }
+}
+
 @MainActor
 public enum AccessibilityBridge {
     public static func hasAccessibilityPermission(prompt: Bool = false) -> Bool {
@@ -114,19 +134,31 @@ public enum AccessibilityBridge {
     ) -> AXWindowInfo? {
         AXUIElementSetMessagingTimeout(element, 0.25)
 
+        var subrole: String?
         if requireStandardRole {
             let role = stringAttribute(element, kAXRoleAttribute)
-            let subrole = stringAttribute(element, kAXSubroleAttribute)
             if role != (kAXWindowRole as String) {
                 return nil
             }
-            if let subrole, subrole != (kAXStandardWindowSubrole as String) {
+            subrole = stringAttribute(element, kAXSubroleAttribute)
+            if let subrole,
+               subrole != (kAXStandardWindowSubrole as String),
+               subrole != (kAXDialogSubrole as String) {
                 return nil
             }
         }
 
         guard let axRect = rectAttribute(element) else {
             return nil
+        }
+
+        if requireStandardRole, subrole == (kAXDialogSubrole as String) {
+            guard axRect.width >= 220,
+                  axRect.height >= 120,
+                  trafficLightRelativeRect(for: element) != nil
+            else {
+                return nil
+            }
         }
 
         var wid: CGWindowID = 0
@@ -205,6 +237,19 @@ public enum AccessibilityBridge {
             AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
         }
         if let sizeVal {
+            AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeVal)
+        }
+    }
+
+    /// Applies `axFrame` in a single Position -> Size pass with a short timeout for interactive resizing.
+    public static func setFrameFast(_ element: AXUIElement, axFrame: CGRect, timeout: Float = 0.08) {
+        AXUIElementSetMessagingTimeout(element, timeout)
+        var pos = axFrame.origin
+        var size = axFrame.size
+        if let posVal = AXValueCreate(.cgPoint, &pos) {
+            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, posVal)
+        }
+        if let sizeVal = AXValueCreate(.cgSize, &size) {
             AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeVal)
         }
     }
@@ -561,11 +606,15 @@ public enum AccessibilityBridge {
         return rel
     }
 
-    public static func sampleTitlebarColor(
+    public static func sampleTitlebarStyle(
         windowID: CGWindowID,
         windowAXFrame: CGRect,
         buttonUnionAXRect: CGRect
-    ) async -> NSColor? {
+    ) async -> SampledTitlebarStyle? {
+        if hasScreenRecordingPermission() && screenCaptureCooldownUntil > 0 {
+            screenCaptureCooldownUntil = 0
+        }
+
         guard windowID != 0,
               windowAXFrame.width > 40,
               windowAXFrame.height > 40,
@@ -598,50 +647,122 @@ public enum AccessibilityBridge {
                 return nil
             }
 
+            let dataLength = CFDataGetLength(data)
             let imgW = cgImage.width
             let imgH = cgImage.height
             let scaleX = CGFloat(imgW) / windowAXFrame.width
             let scaleY = CGFloat(imgH) / windowAXFrame.height
-
-            let buttonRightLocal = buttonUnionAXRect.maxX - windowAXFrame.minX
-            let buttonLeftLocal = buttonUnionAXRect.minX - windowAXFrame.minX
-            let buttonTopLocal = buttonUnionAXRect.minY - windowAXFrame.minY
-            let buttonMidYLocal = buttonUnionAXRect.midY - windowAXFrame.minY
-
-            let sampleXPt = min(windowAXFrame.width - 4, buttonRightLocal + 8)
-            let sampleYPt = max(2, min(windowAXFrame.height - 4, buttonMidYLocal))
-            let fallbackXPt = max(2, min(windowAXFrame.width - 4, buttonLeftLocal + 4))
-            let fallbackYPt = max(2, buttonTopLocal - 4)
-
-            let candidates = [
-                (Int((sampleXPt * scaleX).rounded()), Int((sampleYPt * scaleY).rounded())),
-                (Int((fallbackXPt * scaleX).rounded()), Int((fallbackYPt * scaleY).rounded()))
-            ]
-
             let bytesPerPixel = max(4, cgImage.bitsPerPixel / 8)
             let bytesPerRow = cgImage.bytesPerRow
             let isLittleEndian = cgImage.bitmapInfo.contains(.byteOrder32Little)
 
-            for (rawX, rawY) in candidates {
-                let px = max(0, min(imgW - 1, rawX))
-                let py = max(0, min(imgH - 1, rawY))
+            func sampleRGB(atLocalPoint localPt: CGPoint) -> (r: CGFloat, g: CGFloat, b: CGFloat)? {
+                let px = max(0, min(imgW - 1, Int((localPt.x * scaleX).rounded())))
+                let py = max(0, min(imgH - 1, Int((localPt.y * scaleY).rounded())))
                 let offset = py * bytesPerRow + px * bytesPerPixel
-                guard offset + 3 < CFDataGetLength(data) else { continue }
+                guard offset + 3 < dataLength else { return nil }
 
                 let b0 = CGFloat(ptr[offset]) / 255.0
                 let b1 = CGFloat(ptr[offset + 1]) / 255.0
                 let b2 = CGFloat(ptr[offset + 2]) / 255.0
 
                 if isLittleEndian {
-                    return NSColor(srgbRed: b2, green: b1, blue: b0, alpha: 1.0)
+                    return (r: b2, g: b1, b: b0)
                 } else {
-                    return NSColor(srgbRed: b0, green: b1, blue: b2, alpha: 1.0)
+                    return (r: b0, g: b1, b: b2)
                 }
             }
-            return nil
+
+            func median(_ values: [CGFloat]) -> CGFloat {
+                let sorted = values.sorted()
+                let mid = sorted.count / 2
+                if sorted.count % 2 == 1 {
+                    return sorted[mid]
+                }
+                return (sorted[mid - 1] + sorted[mid]) * 0.5
+            }
+
+            func medianColor(xs: [CGFloat], y: CGFloat) -> NSColor? {
+                var rs: [CGFloat] = []
+                var gs: [CGFloat] = []
+                var bs: [CGFloat] = []
+                rs.reserveCapacity(xs.count)
+                gs.reserveCapacity(xs.count)
+                bs.reserveCapacity(xs.count)
+
+                for x in xs {
+                    if let rgb = sampleRGB(atLocalPoint: CGPoint(x: x, y: y)) {
+                        rs.append(rgb.r)
+                        gs.append(rgb.g)
+                        bs.append(rgb.b)
+                    }
+                }
+                guard !rs.isEmpty else { return nil }
+                return NSColor(
+                    srgbRed: median(rs),
+                    green: median(gs),
+                    blue: median(bs),
+                    alpha: 1.0
+                )
+            }
+
+            let buttonRightLocal = buttonUnionAXRect.maxX - windowAXFrame.minX
+            let buttonTopLocal = buttonUnionAXRect.minY - windowAXFrame.minY
+            let buttonBottomLocal = buttonUnionAXRect.maxY - windowAXFrame.minY
+            let buttonMidYLocal = buttonUnionAXRect.midY - windowAXFrame.minY
+
+            let bandStartX = min(max(2, buttonRightLocal + 6), max(2, windowAXFrame.width - 12))
+            let bandEndX = max(bandStartX, min(windowAXFrame.width - 12, buttonRightLocal + 34))
+            let sampleCount = 7
+            let bandXs: [CGFloat] = (0..<sampleCount).map { idx in
+                let t = CGFloat(idx) / CGFloat(sampleCount - 1)
+                return bandStartX + (bandEndX - bandStartX) * t
+            }
+
+            let topY = min(windowAXFrame.height - 4, max(2, min(4, buttonTopLocal - 1)))
+            let midY = max(2, min(windowAXFrame.height - 4, buttonMidYLocal))
+            let bottomY = max(2, min(windowAXFrame.height - 4, buttonBottomLocal + 1))
+
+            let cornerX = max(2, min(windowAXFrame.width - 10, max(16, buttonRightLocal + 12)))
+            let cornerY = max(3, min(windowAXFrame.height - 4, buttonTopLocal))
+            let cornerXs = [
+                max(2, cornerX - 2),
+                cornerX,
+                min(windowAXFrame.width - 4, cornerX + 2)
+            ]
+
+            guard let topColor = medianColor(xs: bandXs, y: topY),
+                  let midColor = medianColor(xs: bandXs, y: midY),
+                  let bottomColor = medianColor(xs: bandXs, y: bottomY),
+                  let cornerColor = medianColor(xs: cornerXs, y: cornerY)
+            else {
+                return nil
+            }
+
+            return SampledTitlebarStyle(
+                topColor: topColor,
+                midColor: midColor,
+                bottomColor: bottomColor,
+                cornerColor: cornerColor
+            )
         } catch {
+            if !hasScreenRecordingPermission() {
+                screenCaptureCooldownUntil = ProcessInfo.processInfo.systemUptime + 4.0
+            }
             return nil
         }
+    }
+
+    public static func sampleTitlebarColor(
+        windowID: CGWindowID,
+        windowAXFrame: CGRect,
+        buttonUnionAXRect: CGRect
+    ) async -> NSColor? {
+        await sampleTitlebarStyle(
+            windowID: windowID,
+            windowAXFrame: windowAXFrame,
+            buttonUnionAXRect: buttonUnionAXRect
+        )?.midColor
     }
 
     // MARK: - Live Window Thumbnail & Snapshot (ScreenCaptureKit)

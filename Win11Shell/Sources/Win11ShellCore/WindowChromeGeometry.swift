@@ -615,6 +615,95 @@ public enum WindowChromeGeometry {
         case right
     }
 
+    public enum WindowResizeEdge: Equatable, Sendable {
+        case top
+        case bottom
+        case left
+        case right
+        case topLeft
+        case topRight
+        case bottomLeft
+        case bottomRight
+    }
+
+    /// Returns the combined AX bounding rect of a window and its docked chrome bar.
+    public static func combinedWindowAndBarAXFrame(
+        windowAXFrame: CGRect,
+        barAXFrame: CGRect
+    ) -> CGRect {
+        windowAXFrame.union(barAXFrame)
+    }
+
+    /// Hit-tests the outer perimeter of `combinedFrameAX` (expanded outward by `outset` and
+    /// extending `borderThickness` inward, with `cornerSize` corner catch zones) in AX coordinates.
+    public static func windowResizeEdge(
+        atAXPoint pt: CGPoint,
+        combinedFrameAX: CGRect,
+        borderThickness: CGFloat = 6,
+        outset: CGFloat = 2,
+        cornerSize: CGFloat = 14,
+        isTopClipped: Bool = false,
+        isLeftClipped: Bool = false,
+        isRightClipped: Bool = false,
+        isBottomClipped: Bool = false
+    ) -> WindowResizeEdge? {
+        guard !combinedFrameAX.isNull,
+              combinedFrameAX.width > 0,
+              combinedFrameAX.height > 0
+        else {
+            return nil
+        }
+
+        let leftOutset: CGFloat = isLeftClipped ? 0 : outset
+        let rightOutset: CGFloat = isRightClipped ? 0 : outset
+        let topOutset: CGFloat = isTopClipped ? 0 : outset
+        let bottomOutset: CGFloat = isBottomClipped ? 0 : outset
+
+        guard pt.x >= combinedFrameAX.minX - leftOutset,
+              pt.x <= combinedFrameAX.maxX + rightOutset,
+              pt.y >= combinedFrameAX.minY - topOutset,
+              pt.y <= combinedFrameAX.maxY + bottomOutset
+        else {
+            return nil
+        }
+
+        let nearTop = !isTopClipped && pt.y <= combinedFrameAX.minY + borderThickness
+        let nearBottom = !isBottomClipped && pt.y >= combinedFrameAX.maxY - borderThickness
+        let nearLeft = !isLeftClipped && pt.x <= combinedFrameAX.minX + borderThickness
+        let nearRight = !isRightClipped && pt.x >= combinedFrameAX.maxX - borderThickness
+
+        let inTopCornerY = !isTopClipped && pt.y <= combinedFrameAX.minY + cornerSize
+        let inBottomCornerY = !isBottomClipped && pt.y >= combinedFrameAX.maxY - cornerSize
+        let inLeftCornerX = !isLeftClipped && pt.x <= combinedFrameAX.minX + cornerSize
+        let inRightCornerX = !isRightClipped && pt.x >= combinedFrameAX.maxX - cornerSize
+
+        if inTopCornerY && inLeftCornerX {
+            return .topLeft
+        }
+        if inTopCornerY && inRightCornerX {
+            return .topRight
+        }
+        if inBottomCornerY && inLeftCornerX {
+            return .bottomLeft
+        }
+        if inBottomCornerY && inRightCornerX {
+            return .bottomRight
+        }
+        if nearTop {
+            return .top
+        }
+        if nearBottom {
+            return .bottom
+        }
+        if nearLeft {
+            return .left
+        }
+        if nearRight {
+            return .right
+        }
+        return nil
+    }
+
     /// Hit-tests the outer resize borders and top corners of a chrome bar in top-left local coordinates.
     public static func chromeBarResizeEdge(
         atLocalPoint pt: CGPoint,
@@ -660,27 +749,28 @@ public enum WindowChromeGeometry {
         return nil
     }
 
-    /// Computes a clamped window AX frame while dragging one of the chrome bar's top/side resize edges.
+    /// Computes a clamped window AX frame while dragging any of the 8 outer resize edges or corners.
     public static func resizedWindowAXFrame(
         startWindowAXFrame: CGRect,
-        edge: ChromeBarResizeEdge,
+        edge: WindowResizeEdge,
         deltaAX: CGSize,
         minSize: CGSize = CGSize(width: 260, height: 160),
-        minWindowTopAX: CGFloat
+        minWindowTopAX: CGFloat,
+        maxWindowBottomAX: CGFloat? = nil
     ) -> CGRect {
         var minX = startWindowAXFrame.minX
         var maxX = startWindowAXFrame.maxX
         var minY = startWindowAXFrame.minY
-        let maxY = startWindowAXFrame.maxY
+        var maxY = startWindowAXFrame.maxY
 
         switch edge {
-        case .left, .topLeft:
+        case .left, .topLeft, .bottomLeft:
             let proposedMinX = startWindowAXFrame.minX + deltaAX.width
             minX = min(proposedMinX, maxX - minSize.width)
-        case .right, .topRight:
+        case .right, .topRight, .bottomRight:
             let proposedMaxX = startWindowAXFrame.maxX + deltaAX.width
             maxX = max(proposedMaxX, minX + minSize.width)
-        case .top:
+        case .top, .bottom:
             break
         }
 
@@ -689,6 +779,13 @@ public enum WindowChromeGeometry {
             let proposedMinY = startWindowAXFrame.minY + deltaAX.height
             let maxAllowedMinY = max(minWindowTopAX, maxY - minSize.height)
             minY = min(max(proposedMinY, minWindowTopAX), maxAllowedMinY)
+        case .bottom, .bottomLeft, .bottomRight:
+            let proposedMaxY = startWindowAXFrame.maxY + deltaAX.height
+            var clampedMaxY = max(proposedMaxY, minY + minSize.height)
+            if let maxWindowBottomAX {
+                clampedMaxY = min(clampedMaxY, max(minY + minSize.height, maxWindowBottomAX))
+            }
+            maxY = clampedMaxY
         case .left, .right:
             break
         }
@@ -698,6 +795,37 @@ public enum WindowChromeGeometry {
             y: minY,
             width: max(minSize.width, maxX - minX),
             height: max(minSize.height, maxY - minY)
+        )
+    }
+
+    /// Computes a clamped window AX frame while dragging one of the chrome bar's top/side resize edges.
+    public static func resizedWindowAXFrame(
+        startWindowAXFrame: CGRect,
+        edge: ChromeBarResizeEdge,
+        deltaAX: CGSize,
+        minSize: CGSize = CGSize(width: 260, height: 160),
+        minWindowTopAX: CGFloat
+    ) -> CGRect {
+        let mappedEdge: WindowResizeEdge
+        switch edge {
+        case .top:
+            mappedEdge = .top
+        case .topLeft:
+            mappedEdge = .topLeft
+        case .topRight:
+            mappedEdge = .topRight
+        case .left:
+            mappedEdge = .left
+        case .right:
+            mappedEdge = .right
+        }
+        return resizedWindowAXFrame(
+            startWindowAXFrame: startWindowAXFrame,
+            edge: mappedEdge,
+            deltaAX: deltaAX,
+            minSize: minSize,
+            minWindowTopAX: minWindowTopAX,
+            maxWindowBottomAX: nil
         )
     }
 
