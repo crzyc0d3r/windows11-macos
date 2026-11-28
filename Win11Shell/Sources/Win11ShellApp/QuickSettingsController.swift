@@ -709,8 +709,6 @@ private struct TaskbarSettingsFlyoutView: View {
             .pickerStyle(.segmented)
 
             Toggle("Automatically hide taskbar", isOn: $model.config.taskbarAutoHide)
-            Toggle("Show Search button", isOn: $model.config.showSearchButton)
-            Toggle("Show Task View button", isOn: $model.config.showTaskViewButton)
             Toggle("Show Widgets chip", isOn: $model.config.showWidgetsButton)
             Toggle("Per-window menu bar + (— □ ✕)", isOn: $model.config.showWindowChromeBar)
             Toggle("Hide macOS top menu bar", isOn: Binding(

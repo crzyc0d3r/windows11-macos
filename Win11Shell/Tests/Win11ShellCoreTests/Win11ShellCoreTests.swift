@@ -21,6 +21,8 @@ struct Win11ShellCoreTests {
         try store.save(config)
         let loaded = store.load()
         #expect(loaded == config)
+        #expect(!Win11Config.default.showSearchButton)
+        #expect(!Win11Config.default.showTaskViewButton)
         #expect(loaded.windowBarExcludedBundleIDs == [
             "com.hackedple.win11shell",
             "com.apple.Spotlight",

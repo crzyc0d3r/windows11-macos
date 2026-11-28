@@ -114,16 +114,6 @@ public final class TaskbarCoordinator {
                     self?.auxFlyouts.dismiss()
                     self?.startMenu.toggle(focusSearch: false, on: screen)
                 },
-                onSearchClick: { [weak self] in
-                    self?.quickSettings.dismiss()
-                    self?.calendarFlyout.dismiss()
-                    self?.auxFlyouts.dismiss()
-                    self?.startMenu.toggle(focusSearch: true, on: screen)
-                },
-                onTaskViewClick: { [weak self] in
-                    self?.dismissAllFlyouts()
-                    NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Mission Control.app"))
-                },
                 onWidgetsClick: { [weak self] in
                     self?.startMenu.dismiss()
                     self?.quickSettings.dismiss()
@@ -268,8 +258,6 @@ private struct TaskbarView: View {
     let model: RunningAppsModel
     let system: SystemControlsBridge
     let onStartClick: () -> Void
-    let onSearchClick: () -> Void
-    let onTaskViewClick: () -> Void
     let onWidgetsClick: () -> Void
     let onTrayOverflowClick: () -> Void
     let onQuickSettingsClick: () -> Void
@@ -372,24 +360,6 @@ private struct TaskbarView: View {
                 Win11LogoGlyph(size: 19)
             }
             .help("Start (Win)")
-
-            // Search
-            if model.config.showSearchButton {
-                TaskbarGlyphButton(action: onSearchClick) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15, weight: .medium))
-                }
-                .help("Search (Win+S)")
-            }
-
-            // Task View
-            if model.config.showTaskViewButton {
-                TaskbarGlyphButton(action: onTaskViewClick) {
-                    Image(systemName: "rectangle.3.group")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .help("Task View (Win+Tab)")
-            }
 
             ForEach(model.taskbarItems) { item in
                 TaskbarAppIconButton(
